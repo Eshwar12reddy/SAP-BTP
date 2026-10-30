@@ -1,0 +1,30 @@
+
+name: btp-ai-operations-agent
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: btp-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-btp_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-btp_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-local-password}
+
+    ports:
+      - "127.0.0.1:5444:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
