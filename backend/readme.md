@@ -1,6 +1,5 @@
 ```powershell
-# Start PostgreSQL
-docker compose up -d
+# Check PostgreSQL (existing btp-postgres container, host port 5444)
 docker compose ps
 
 # Navigate to Backend
@@ -19,11 +18,18 @@ python -m pip install -r requirements.txt
 # Verify Dependencies
 python -m pip check
 
-# Run FastAPI
-python -m uvicorn app.main:app --reload --port 8000
+# Migrations
+python -m alembic current
+python -m alembic upgrade head
 
-# Run Tests
-python -m pytest tests -v
+# Run FastAPI (selects a psycopg-compatible event loop on Windows)
+python -m app --reload
+
+# Alternative: plain uvicorn (on Windows, --loop is required without --reload)
+python -m uvicorn app.main:app --port 8000 --loop asyncio:SelectorEventLoop
+
+# Run Tests (uses the separate btp_agent_test database)
+python -m pytest -v
 
 # Check Code Quality
 python -m ruff check .
@@ -31,4 +37,3 @@ python -m ruff check .
 # Deactivate Virtual Environment
 deactivate
 ```
-
