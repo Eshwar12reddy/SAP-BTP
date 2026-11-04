@@ -8,9 +8,11 @@ interface ComposerProps {
   onChange: (value: string) => void
   onSubmit: () => void
   autoFocusKey: string
+  /** Button text while ``sending`` is true. */
+  busyLabel?: string
 }
 
-export function Composer({ value, sending, onChange, onSubmit, autoFocusKey }: ComposerProps) {
+export function Composer({ value, sending, onChange, onSubmit, autoFocusKey, busyLabel = 'Saving…' }: ComposerProps) {
   const textarea = useRef<HTMLTextAreaElement>(null)
   const tooLong = value.length > MAX_MESSAGE_LENGTH
   const canSend = !sending && value.trim().length > 0 && !tooLong
@@ -66,7 +68,7 @@ export function Composer({ value, sending, onChange, onSubmit, autoFocusKey }: C
           </span>
         )}
         <button type="submit" className="button button--primary" disabled={!canSend}>
-          {sending ? 'Saving…' : 'Send'}
+          {sending ? busyLabel : 'Send'}
         </button>
       </div>
     </form>

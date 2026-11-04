@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { navigateTo, subscribeToNavigation } from './router'
 
 /**
  * Minimal URL routing: "/" (no selection) and "/c/:conversationId".
@@ -17,15 +18,10 @@ export function pathForConversation(id: string | null): string {
 export function useConversationRoute(): [string | null, (id: string | null) => void] {
   const [activeId, setActiveId] = useState(() => conversationIdFromPath(window.location.pathname))
 
-  useEffect(() => {
-    const onPopState = () => setActiveId(conversationIdFromPath(window.location.pathname))
-    window.addEventListener('popstate', onPopState)
-    return () => window.removeEventListener('popstate', onPopState)
-  }, [])
+  useEffect(() => subscribeToNavigation(() => setActiveId(conversationIdFromPath(window.location.pathname))), [])
 
   const navigate = useCallback((id: string | null) => {
-    const path = pathForConversation(id)
-    if (window.location.pathname !== path) window.history.pushState(null, '', path)
+    navigateTo(pathForConversation(id))
     setActiveId(id)
   }, [])
 

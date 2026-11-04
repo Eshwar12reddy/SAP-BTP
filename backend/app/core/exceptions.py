@@ -26,10 +26,52 @@ class AppError(Exception):
     status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
     code = "internal_error"
     message = "An unexpected error occurred."
+    headers: dict[str, str] | None = None
 
-    def __init__(self, message: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        code: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(message or self.message)
         self.message = message or self.message
+        if code:
+            self.code = code
+        if headers:
+            self.headers = headers
+
+
+class BadRequestError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "bad_request"
+    message = "The request could not be processed."
+
+
+class AuthenticationError(AppError):
+    status_code = status.HTTP_401_UNAUTHORIZED
+    code = "not_authenticated"
+    message = "Authentication is required."
+    headers = {"WWW-Authenticate": "Bearer"}  # noqa: RUF012
+
+
+class PermissionDeniedError(AppError):
+    status_code = status.HTTP_403_FORBIDDEN
+    code = "forbidden"
+    message = "You do not have permission to perform this action."
+
+
+class TooManyRequestsError(AppError):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "too_many_requests"
+    message = "Too many attempts. Please wait and try again."
+
+
+class PayloadTooLargeError(AppError):
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    code = "payload_too_large"
+    message = "The upload is larger than the allowed maximum."
 
 
 class NotFoundError(AppError):
@@ -69,7 +111,9 @@ def is_database_unavailable(exc: sa_exc.SQLAlchemyError) -> bool:
 
 
 async def _app_error_handler(_: Request, exc: AppError) -> JSONResponse:
-    return JSONResponse(error_body(exc.code, exc.message), status_code=exc.status_code)
+    return JSONResponse(
+        error_body(exc.code, exc.message), status_code=exc.status_code, headers=exc.headers
+    )
 
 
 async def _http_error_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:

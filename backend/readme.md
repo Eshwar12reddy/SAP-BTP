@@ -22,6 +22,11 @@ python -m pip check
 python -m alembic current
 python -m alembic upgrade head
 
+# First platform administrator (one-time) and BTP mapping
+python -m app.cli create-admin --email admin@example.com --display-name "Platform Admin"
+python -m app.cli btp --help
+python -m app.cli assign-legacy-conversations --help
+
 # Run FastAPI (selects a psycopg-compatible event loop on Windows)
 python -m app --reload
 

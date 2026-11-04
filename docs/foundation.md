@@ -1,6 +1,8 @@
 # Project Foundation (Phase 1)
 
-This phase provides persistent, database-backed chat: a FastAPI backend that stores conversations and user messages in PostgreSQL, and a React chat UI that reads and writes them. There is no AI yet. Authentication, RAG, DeepSeek and SAP BTP integrations come in later phases.
+This phase provides persistent, database-backed chat: a FastAPI backend that stores conversations and user messages in PostgreSQL, and a React chat UI that reads and writes them. There is no AI yet.
+
+> **Phase 2 update:** authentication, roles, BTP scopes and administration are now in place. All conversation endpoints require sign-in, and conversations belong to their creator. See [auth-rbac.md](auth-rbac.md). Statements below about missing authentication describe Phase 1 only.
 
 ## Architecture
 
@@ -49,7 +51,7 @@ The existing `btp-postgres` container (`pgvector/pgvector:pg16`, created by `doc
 | Database / role | `btp_agent` / `btp_agent` (password lives in `.env`) |
 | Application tables | `conversations`, `messages`, `alembic_version` |
 | Test database | `btp_agent_test` (same server, created automatically by the test suite) |
-| pgvector | Available in the image (0.8.7) but **not enabled**; the RAG phase will add `CREATE EXTENSION vector` in a migration |
+| pgvector | Available in the image (0.8.7); Phase 10 requires an operator to enable it before applying its index migration |
 
 ### Schema
 
@@ -161,7 +163,7 @@ Manual browser check:
 
 ## Known limitations
 
-- **No authentication.** Conversation endpoints are for trusted local development only. The API binds to `127.0.0.1` and `APP_ENV=production` is refused. Do not expose it on a network.
+- ~~No authentication~~: resolved in Phase 2 ([auth-rbac.md](auth-rbac.md)).
 - No AI responses. After saving, the UI shows a neutral notice that is not stored as a message.
 - No edit, delete or rename endpoints for conversations or messages.
 - The sidebar shows the 100 most recently active conversations (the API supports paging beyond that).
@@ -171,5 +173,5 @@ Manual browser check:
 
 - **Auth:** add `owner_id` to `conversations` (migration), resolve the user in a dependency next to `get_session`, filter every query in `conversation_service` by owner (return 404 for other users' data), then lift the production guard in `config.py`.
 - **DeepSeek:** an assistant reply is a server-created `Message(role="assistant", client_message_id=None)`, written in its own transaction after the user message commits. `DEEPSEEK_API_KEY` is already reserved in `.env.example`.
-- **RAG:** a migration enabling `vector` plus embedding tables. The `pgvector` Python package is already a dependency.
+- **RAG:** Phase 10 adds parent/child indexes and optional vectors. Its migration checks for `vector` but does not enable it; operator approval is required for the main database.
 - **Infrastructure actions / approvals:** new tables and services. Reuse the error and logging conventions above.

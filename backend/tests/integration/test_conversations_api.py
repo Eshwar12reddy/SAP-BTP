@@ -6,7 +6,20 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from app.auth.permissions import RoleName
+from tests.support import create_tree, user_with_role
+
 BASE = "/api/v1/conversations"
+
+
+@pytest.fixture(autouse=True)
+async def authenticated(client: AsyncClient) -> None:
+    """Phase 1 behaviour, exercised as an authenticated viewer."""
+    tree = await create_tree(client.app)  # type: ignore[attr-defined]
+    _, headers = await user_with_role(
+        client.app, client, "chatter@example.com", RoleName.VIEWER, tree.sub  # type: ignore[attr-defined]
+    )
+    client.headers.update(headers)
 
 
 async def create(client: AsyncClient, **body) -> dict:

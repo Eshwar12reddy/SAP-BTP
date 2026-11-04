@@ -1,16 +1,21 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Composer } from '../components/Composer'
+import { ContextSelector, contextLabel, useBtpContext } from '../components/ContextSelector'
 import { MessageList } from '../components/MessageList'
 import { Sidebar } from '../components/Sidebar'
+import { canRetryReply, useAgentReply } from '../hooks/useAgentReply'
 import { useConversations } from '../hooks/useConversations'
 import { useMessageSender } from '../hooks/useMessageSender'
 import { useMessages } from '../hooks/useMessages'
 import { useConversationRoute } from '../routes/conversationRoute'
 import { ApiError, api } from '../services/api'
+import type { AgentReply, Message } from '../types/api'
 
 /** Draft key for the "new chat" state, before a conversation exists. */
 const NEW_CHAT = 'new'
-export const SAVED_NOTICE = 'Message saved. AI responses will be available after AI integration.'
+export const REPLYING_NOTICE = 'Generating a reply…'
+export const STILL_GENERATING = 'Reply still generating…'
+export const REPLY_INCOMPLETE = 'The reply did not complete.'
 
 function asApiError(e: unknown): ApiError {
   return e instanceof ApiError ? e : new ApiError('server', 'Something went wrong. Please try again.', null, null)
@@ -21,20 +26,49 @@ export function ChatPage() {
   const conversations = useConversations()
   const history = useMessages(activeId)
   const { send, sendingFor } = useMessageSender()
+  const btp = useBtpContext()
+  const { upsert } = conversations
+  const { append } = history
+
+  const onReply = useCallback(
+    (reply: AgentReply) => {
+      // Ignored if the user has moved on; reopening the conversation loads it from the server.
+      append(reply.message)
+      api.getConversation(reply.message.conversation_id).then(upsert).catch(() => undefined)
+    },
+    [append, upsert],
+  )
+  const { states: replyStates, requestReply, watch, checkNow } = useAgentReply(onReply)
 
   // Unsent text per conversation; survives failed requests and switching conversations.
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [sendError, setSendError] = useState<{ key: string; error: ApiError } | null>(null)
-  const [noticeFor, setNoticeFor] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const key = activeId ?? NEW_CHAT
   const draft = drafts[key] ?? ''
-  const sending = activeId ? sendingFor === activeId : creating
+  const replying = Object.values(replyStates).some((s) => s.kind === 'requesting' && s.conversationId === activeId)
+  const saving = activeId ? sendingFor === activeId : creating
+  const sending = saving || replying
   const active = conversations.conversations.find((c) => c.id === activeId) ?? null
   const currentError = sendError?.key === key ? sendError.error : null
-  const { upsert } = conversations
+
+  /** User messages that already have their reply loaded. */
+  const answered = useMemo(
+    () => new Set(history.messages.map((m) => m.reply_to_message_id).filter(Boolean)),
+    [history.messages],
+  )
+
+  // A reply the server reports as still generating (e.g. after a refresh) is watched with
+  // read-only status checks. Loading a conversation never starts an AI call.
+  useEffect(() => {
+    for (const m of history.messages) {
+      if (m.role === 'user' && m.reply_status === 'generating' && !answered.has(m.id) && !replyStates[m.id]) {
+        watch(m.conversation_id, m.id)
+      }
+    }
+  }, [history.messages, answered, replyStates, watch])
 
   // A conversation opened by URL may be older than the loaded sidebar page.
   useEffect(() => {
@@ -53,20 +87,62 @@ export function ChatPage() {
 
   const selectConversation = (id: string | null) => {
     navigate(id)
-    setNoticeFor(null)
     setSidebarOpen(false)
+  }
+
+  /** Reply state under a user message: still generating, or failed with a retry. */
+  const renderReplyStatus = (message: Message) => {
+    if (message.role !== 'user' || answered.has(message.id)) return null
+    const state = replyStates[message.id]
+    const check = () => checkNow(message.conversation_id, message.id)
+    if (state?.kind === 'generating' || (!state && message.reply_status === 'generating')) {
+      return (
+        <div className="reply-status" role="status">
+          <span>{STILL_GENERATING}</span>
+          <button type="button" className="button button--ghost" onClick={check}>
+            Check now
+          </button>
+        </div>
+      )
+    }
+    if (state?.kind === 'stalled') {
+      return (
+        <div className="reply-status" role="status">
+          <span>The reply is taking longer than expected.</span>
+          <button type="button" className="button button--ghost" onClick={check}>
+            Check again
+          </button>
+        </div>
+      )
+    }
+    const error = state?.kind === 'failed' ? state.error : null
+    const failed = state?.kind === 'failed' || (!state && message.reply_status === 'failed')
+    if (!failed) return null
+    return (
+      <div className="reply-status reply-status--error" role="alert">
+        <span>AI reply failed. {error?.message ?? REPLY_INCOMPLETE}</span>
+        {canRetryReply(error) && (
+          <button
+            type="button"
+            className="button button--ghost"
+            onClick={() => void requestReply(message.conversation_id, message.id)}
+          >
+            Retry reply
+          </button>
+        )}
+      </div>
+    )
   }
 
   const handleSend = async () => {
     const content = draft
     setSendError(null)
-    setNoticeFor(null)
 
     let targetId = activeId
     if (!targetId) {
       setCreating(true)
       try {
-        const conversation = await api.createConversation()
+        const conversation = await api.createConversation(btp.selectedContext)
         upsert(conversation)
         targetId = conversation.id
         setDrafts(({ [NEW_CHAT]: moved, ...rest }) => ({ ...rest, [conversation.id]: moved ?? content }))
@@ -80,16 +156,20 @@ export function ChatPage() {
     }
 
     const conversationId = targetId
+    let messageId: string
     try {
       const message = await send(conversationId, content)
-      history.append(message)
+      append(message)
+      messageId = message.id
       setDrafts((d) => ({ ...d, [conversationId]: d[conversationId] === content ? '' : (d[conversationId] ?? '') }))
-      setNoticeFor(conversationId)
       // Pick up the new activity time (and auto-title) for the sidebar.
       api.getConversation(conversationId).then(upsert).catch(() => undefined)
     } catch (e) {
       setSendError({ key: conversationId, error: asApiError(e) })
+      return
     }
+    // Only a message the server has saved is ever answered.
+    await requestReply(conversationId, messageId)
   }
 
   const notFound = activeId !== null && history.status === 'not_found'
@@ -121,6 +201,12 @@ export function ChatPage() {
             ☰
           </button>
           <h1 className="chat__title">{active?.title ?? (activeId ? '' : 'New conversation')}</h1>
+          {activeId === null ? (
+            <ContextSelector context={btp} />
+          ) : (
+            active &&
+            contextLabel(btp.scopes, active) && <span className="badge badge--muted chat__context">{contextLabel(btp.scopes, active)}</span>
+          )}
         </header>
 
         {notFound ? (
@@ -148,7 +234,10 @@ export function ChatPage() {
             {showEmpty ? (
               <div className="chat__state chat__state--empty">
                 <h2>Start a conversation</h2>
-                <p>Messages are saved to the database. AI responses will be available after AI integration.</p>
+                <p>
+                  Ask about SAP BTP concepts, your accounts and environments, architecture or sizing. Each answer says
+                  where its information came from.
+                </p>
               </div>
             ) : (
               history.messages.length > 0 && (
@@ -157,10 +246,11 @@ export function ChatPage() {
                   hasMore={history.hasMore}
                   loadingOlder={history.loadingOlder}
                   onLoadOlder={() => void history.loadOlder()}
+                  renderStatus={renderReplyStatus}
                   footer={
-                    noticeFor === activeId && (
+                    replying && (
                       <p className="notice" role="status">
-                        {SAVED_NOTICE}
+                        {REPLYING_NOTICE}
                       </p>
                     )
                   }
@@ -184,6 +274,7 @@ export function ChatPage() {
               <Composer
                 value={draft}
                 sending={sending}
+                busyLabel={replying ? 'Replying…' : 'Saving…'}
                 autoFocusKey={key}
                 onChange={(value) => setDraft(key, value)}
                 onSubmit={() => void handleSend()}

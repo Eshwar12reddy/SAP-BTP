@@ -5,6 +5,7 @@ import uuid
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import URL
 
+from app.auth.tokens import create_access_token
 from app.main import create_app
 from tests.conftest import make_settings
 
@@ -36,6 +37,12 @@ async def _outage_client(url: URL):
 async def test_database_unreachable(clean_database: URL) -> None:
     # Nothing listens on port 1: a safe, simulated outage that leaves PostgreSQL untouched.
     app, client = await _outage_client(clean_database.set(port=1))
+    # A correctly signed token gets past JWT validation, so the session lookup must hit
+    # the (unreachable) database: that path has to answer 503, not 401 or 500.
+    token, _ = create_access_token(
+        make_settings(clean_database), user_id=uuid.uuid4(), session_id=uuid.uuid4()
+    )
+    client.headers["Authorization"] = f"Bearer {token}"
     async with app.router.lifespan_context(app), client:
         live = await client.get("/health/live")
         ready = await client.get("/health/ready")

@@ -32,6 +32,7 @@ httpx>=0.27,<1.0
 
 # Authentication
 PyJWT[crypto]>=2.9,<3.0
+argon2-cffi>=23.1,<26.0
 
 # Testing and Code Quality
 pytest>=8.0,<10.0

@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.message import MessageRole
+from app.models.message import MessageRole, ReplyStatus
 
 MESSAGE_MAX_LENGTH = 32_000
 
@@ -41,6 +41,11 @@ class MessageRead(BaseModel):
     role: MessageRole
     content: str
     client_message_id: uuid.UUID | None
+    # Assistant replies: the user message they answer.
+    reply_to_message_id: uuid.UUID | None = None
+    # User messages: the agent-reply attempt (null if never requested). An abandoned
+    # "generating" attempt is reported as "failed".
+    reply_status: ReplyStatus | None = None
     created_at: datetime
 
 

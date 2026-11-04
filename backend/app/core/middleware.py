@@ -10,12 +10,17 @@ import uuid
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.core.exceptions import error_body
-from app.core.logging import request_id_var
+from app.core.exceptions import PayloadTooLargeError, error_body
+from app.core.logging import client_ip_var, request_id_var
 
 logger = logging.getLogger("app.request")
 
 REQUEST_ID_HEADER = "x-request-id"
+SECURITY_HEADERS = [
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"no-referrer"),
+]
 # Accept a caller's id only if it is short and harmless to echo into logs.
 _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -33,6 +38,8 @@ class RequestContextMiddleware:
 
         request_id = _incoming_request_id(scope) or uuid.uuid4().hex
         token = request_id_var.set(request_id)
+        client = scope.get("client")
+        ip_token = client_ip_var.set(client[0][:45] if client else None)
         started = time.perf_counter()
         status_code = 500
         response_started = False
@@ -44,11 +51,28 @@ class RequestContextMiddleware:
                 status_code = message["status"]
                 headers = list(message.get("headers", []))
                 headers.append((REQUEST_ID_HEADER.encode(), request_id.encode()))
+                headers.extend(SECURITY_HEADERS)
                 message = {**message, "headers": headers}
             await send(message)
 
         try:
             await self.app(scope, receive, send_wrapper)
+        except PayloadTooLargeError as exc:
+            status_code = exc.status_code
+            if not response_started:
+                body = json.dumps(error_body(exc.code, exc.message)).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": exc.status_code,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                            (REQUEST_ID_HEADER.encode(), request_id.encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
         except Exception:
             status_code = 500
             logger.exception(
@@ -85,6 +109,7 @@ class RequestContextMiddleware:
                 },
             )
             request_id_var.reset(token)
+            client_ip_var.reset(ip_token)
 
 
 def _incoming_request_id(scope: Scope) -> str | None:
@@ -112,3 +137,60 @@ def _route_template(scope: Scope) -> str:
     names = {str(value): name for name, value in (scope.get("path_params") or {}).items()}
     segments = scope.get("path", "").split("/")
     return "/".join(f"{{{names[s]}}}" if s in names else s for s in segments)
+
+
+class UploadSizeLimitMiddleware:
+    """Bounds request bodies under ``path_prefix`` while they stream in.
+
+    The multipart parser spools uploads to temporary files before any endpoint code runs,
+    so the limit has to apply here: a declared Content-Length over the limit is refused at
+    once, and an undeclared or understated body is cut off as soon as it passes the limit.
+    """
+
+    def __init__(self, app: ASGIApp, *, path_prefix: str, max_body_bytes: int) -> None:
+        self.app = app
+        self.path_prefix = path_prefix
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope["method"] not in ("POST", "PUT", "PATCH")
+            or not scope["path"].startswith(self.path_prefix)
+        ):
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope["headers"]).get(b"content-length")
+        if declared is not None and (not declared.isdigit() or int(declared) > self.max_body_bytes):
+            await _send_too_large(send)
+            return
+
+        received = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_bytes:
+                    raise PayloadTooLargeError()
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
+async def _send_too_large(send: Send) -> None:
+    error = PayloadTooLargeError()
+    body = json.dumps(error_body(error.code, error.message)).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": error.status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"connection", b"close"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})

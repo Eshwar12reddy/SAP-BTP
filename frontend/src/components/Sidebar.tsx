@@ -1,4 +1,5 @@
 import type { LoadStatus } from '../hooks/useConversations'
+import { UserMenu } from './AppNav'
 import type { Conversation } from '../types/api'
 
 interface SidebarProps {
@@ -22,7 +23,7 @@ export function Sidebar({ conversations, status, error, activeId, open, onSelect
         New chat
       </button>
 
-      <nav className="sidebar__list">
+      <nav className="sidebar__list" aria-label="Conversation history">
         {status === 'loading' && conversations.length === 0 && <p className="sidebar__hint">Loading conversations…</p>}
         {status === 'error' && (
           <div className="sidebar__hint" role="alert">
@@ -49,6 +50,9 @@ export function Sidebar({ conversations, status, error, activeId, open, onSelect
           ))}
         </ul>
       </nav>
+      <div className="sidebar__footer">
+        <UserMenu current="chat" />
+      </div>
     </aside>
   )
 }

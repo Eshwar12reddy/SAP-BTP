@@ -24,7 +24,11 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+JWT = "unit-test-jwt-secret-with-enough-entropy-0123"
+
+
 def load(**values: object):
+    values.setdefault("JWT_SECRET_KEY", JWT)
     return load_settings(_env_file=None, **values)
 
 
@@ -114,6 +118,26 @@ def test_wildcard_cors_rejected() -> None:
         load(DATABASE_URL="postgresql://u:p@h/db", CORS_ORIGINS="*")
 
 
-def test_production_refused_until_authentication_exists() -> None:
-    with pytest.raises(SettingsError, match="authentication"):
-        load(DATABASE_URL="postgresql://u:p@h/db", APP_ENV="production")
+def test_production_requires_secure_cookies() -> None:
+    with pytest.raises(SettingsError, match="AUTH_COOKIE_SECURE"):
+        load(DATABASE_URL="postgresql://u:p@h/db", APP_ENV="production", AUTH_COOKIE_SECURE=False)
+    assert load(DATABASE_URL="postgresql://u:p@h/db", APP_ENV="production").APP_ENV == "production"
+
+
+@pytest.mark.parametrize(
+    "secret", [None, "short", "replace-with-at-least-32-random-characters", "change-this-" + "x" * 40]
+)
+def test_jwt_secret_required_and_not_a_placeholder(secret: str | None) -> None:
+    with pytest.raises(SettingsError, match="JWT_SECRET_KEY") as info:
+        load(DATABASE_URL="postgresql://u:p@h/db", JWT_SECRET_KEY=secret)
+    if secret:
+        assert secret not in str(info.value)
+
+
+def test_refresh_idle_cannot_exceed_absolute_lifetime() -> None:
+    with pytest.raises(SettingsError, match="REFRESH_IDLE_TTL_SECONDS"):
+        load(
+            DATABASE_URL="postgresql://u:p@h/db",
+            REFRESH_IDLE_TTL_SECONDS=10_000,
+            SESSION_ABSOLUTE_TTL_SECONDS=5_000,
+        )

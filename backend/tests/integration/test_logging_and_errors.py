@@ -7,8 +7,10 @@ from contextlib import asynccontextmanager
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.auth.permissions import RoleName
 from app.core.config import Settings
 from app.main import create_app
+from tests.support import PASSWORD, create_tree, create_user, grant
 
 
 def json_logs(output: str) -> list[dict]:
@@ -26,7 +28,8 @@ async def logged_client(settings: Settings):
 
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app, raise_app_exceptions=False)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(transport=transport, base_url="https://testserver") as client:
+            client.app = app  # type: ignore[attr-defined]
             yield client
 
 
@@ -35,6 +38,13 @@ async def test_request_logs_are_structured_and_exclude_message_content(
 ) -> None:
     secret = "super secret message body"
     async with logged_client(settings) as client:
+        tree = await create_tree(client.app)
+        user = await create_user(client.app, "logger@example.com")
+        await grant(client.app, user, RoleName.VIEWER, tree.sub)
+        login = await client.post(
+            "/api/v1/auth/login", json={"email": "logger@example.com", "password": PASSWORD}
+        )
+        client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
         conversation = (await client.post("/api/v1/conversations")).json()
         response = await client.post(
             f"/api/v1/conversations/{conversation['id']}/messages",
@@ -44,6 +54,8 @@ async def test_request_logs_are_structured_and_exclude_message_content(
 
     output = capsys.readouterr().out
     assert secret not in output
+    assert PASSWORD not in output
+    assert login.json()["access_token"] not in output
     assert conversation["id"] not in output  # route templates, not raw paths
 
     request_logs = [r for r in json_logs(output) if r.get("event") == "http_request"]
