@@ -52,9 +52,43 @@ async def test_database_roles_match_code_definitions(client: AsyncClient) -> Non
 @pytest.mark.parametrize(
     ("role", "expected"),
     [
-        (RoleName.VIEWER, {"chat:use", "btp:read", "knowledge:read"}),
-        (RoleName.OPERATOR, {"chat:use", "btp:read", "knowledge:read", "operations:request", "operations:execute_low_risk"}),
-        (RoleName.APPROVER, {"chat:use", "btp:read", "knowledge:read", "approvals:read", "approvals:decide"}),
+        (
+            RoleName.VIEWER,
+            {
+                "chat:use",
+                "btp:read",
+                "btp:connections:read",
+                "btp:environment:select",
+                "knowledge:read",
+            },
+        ),
+        (
+            RoleName.OPERATOR,
+            {
+                "chat:use",
+                "btp:read",
+                "btp:connections:read",
+                "btp:connections:create",
+                "btp:connections:update",
+                "btp:connections:validate",
+                "btp:environment:select",
+                "knowledge:read",
+                "operations:request",
+                "operations:execute_low_risk",
+            },
+        ),
+        (
+            RoleName.APPROVER,
+            {
+                "chat:use",
+                "btp:read",
+                "btp:connections:read",
+                "btp:environment:select",
+                "knowledge:read",
+                "approvals:read",
+                "approvals:decide",
+            },
+        ),
     ],
 )
 async def test_btp_roles(client: AsyncClient, role: RoleName, expected: set[str]) -> None:

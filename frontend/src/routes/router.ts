@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 /** Fired after in-app navigation, so every route hook re-reads the URL. */
 const NAVIGATE_EVENT = 'btp:navigate'
 
-export type AppView = 'chat' | 'profile' | 'admin'
+export type AppView = 'chat' | 'profile' | 'admin' | 'btp' | 'knowledge' | 'recommendations' | 'architecture' | 'sizing' | 'infrastructure'
 
 export function navigateTo(path: string): void {
   if (window.location.pathname !== path) window.history.pushState(null, '', path)
@@ -22,6 +22,12 @@ export function subscribeToNavigation(listener: () => void): () => void {
 export function viewForPath(pathname: string): AppView {
   if (pathname === '/profile') return 'profile'
   if (pathname === '/admin') return 'admin'
+  if (pathname === '/btp') return 'btp'
+  if (pathname === '/knowledge') return 'knowledge'
+  if (pathname === '/recommendations') return 'recommendations'
+  if (pathname === '/architecture') return 'architecture'
+  if (pathname === '/sizing') return 'sizing'
+  if (pathname === '/infrastructure-plans') return 'infrastructure'
   return 'chat'
 }
 

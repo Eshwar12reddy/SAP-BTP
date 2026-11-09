@@ -54,10 +54,24 @@ Reply state is durable: `messages.reply_status` / `reply_status_at`. Starting a 
 
 The chat renders assistant replies as Markdown (react-markdown + remark-gfm) with raw HTML skipped, only `http`/`https`/`mailto` links, and no images loaded. User messages are always shown as plain text.
 
+## Knowledge retrieval
+
+The core product remains the single AI Operations Agent. Knowledge retrieval is an optional
+supporting capability: authorized users can register private PDF, TXT, and Markdown sources,
+search their active published index, and receive extractive evidence with backend-verified
+citations. Lexical retrieval is available by default; OpenAI embeddings are opt-in and are
+never called while disabled. Upload activation and index publication are one transaction, so
+an extraction or embedding failure does not replace a previously searchable version.
+
+Retrieved document text is not sent to DeepSeek. The current answer capability is therefore
+extractive cited evidence, not DeepSeek-generated document synthesis. Cross-encoder reranking
+is not operational.
+
 ## Limitations
 
 - No live SAP BTP integration: application questions report `btp_integration_unavailable`.
-- No documentation source (RAG) and no validated sizing engine.
+- No live SAP BTP integration and no validated sizing engine.
+- Knowledge retrieval remains optional, extractive-only, and scoped to authorized active sources.
 - Routing rules are keyword-based and deliberately conservative. An imperative such as "Create an architecture diagram" is treated as an operation request and refused.
 - Single-turn: follow-up questions do not see earlier messages.
 - No streaming: a reply appears when it is complete.

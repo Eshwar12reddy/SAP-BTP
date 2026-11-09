@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.auth.permissions import RoleName
+from app.integrations.openai_embeddings import EmbeddingsError
 from app.models import AuditEvent, KnowledgeSource, KnowledgeSourceVersion
 from app.models.knowledge_index import KnowledgeIndexGeneration
 from tests.support import create_tree, user_with_role
@@ -29,6 +30,16 @@ class _MockEmbeddings:
         self.inputs.extend(texts)
         vector = [1.0] + [0.0] * 1535
         return [vector.copy() for _ in texts]
+
+    async def close(self) -> None:
+        return None
+
+
+class _FailingEmbeddings:
+    configured = True
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        raise EmbeddingsError("openai_embeddings_unavailable")
 
     async def close(self) -> None:
         return None
@@ -118,6 +129,71 @@ async def test_manager_registers_downloads_versions_and_soft_removes(client: Asy
         "knowledge.version.uploaded",
         "knowledge.version.validated",
     } <= events
+
+
+async def test_multipart_upload_works_with_runtime_starlette_form_api(client: AsyncClient) -> None:
+    tree = await create_tree(client.app)
+    _, manager = await user_with_role(
+        client.app, client, "knowledge-form-regression@example.com", RoleName.KNOWLEDGE_MANAGER, tree.sub
+    )
+
+    response = await register(
+        client, manager, upload_fields(scope_id=str(tree.sub.id)), b"Multipart form regression.\n"
+    )
+
+    assert response.status_code == 201, response.text
+
+
+async def test_failed_replacement_keeps_previous_version_and_published_generation(
+    client: AsyncClient,
+) -> None:
+    tree = await create_tree(client.app)
+    _, manager = await user_with_role(
+        client.app,
+        client,
+        "knowledge-index-failure@example.com",
+        RoleName.KNOWLEDGE_MANAGER,
+        tree.sub,
+    )
+    created = await register(
+        client, manager, upload_fields(scope_id=str(tree.sub.id)), b"The original searchable runbook.\n"
+    )
+    assert created.status_code == 201, created.text
+    source_id = uuid.UUID(created.json()["id"])
+    original_version_id = uuid.UUID(created.json()["active_version"]["id"])
+
+    client.app.state.settings = client.app.state.settings.model_copy(
+        update={"OPENAI_EMBEDDINGS_ENABLED": True}
+    )
+    client.app.state.openai_embeddings = _FailingEmbeddings()
+    replacement = await client.post(
+        f"{API}/sources/{source_id}/versions",
+        files={"file": ("replacement.txt", b"Replacement that must not activate.\n", "text/plain")},
+        headers=manager,
+    )
+
+    assert replacement.status_code == 503
+    assert replacement.json()["error"]["code"] == "knowledge_index_failed"
+    async with client.app.state.session_factory() as session:
+        source = await session.get(KnowledgeSource, source_id)
+        versions = list(
+            await session.scalars(
+                select(KnowledgeSourceVersion).where(KnowledgeSourceVersion.source_id == source_id)
+            )
+        )
+        generations = list(
+            await session.scalars(
+                select(KnowledgeIndexGeneration).where(
+                    KnowledgeIndexGeneration.source_id == source_id
+                )
+            )
+        )
+    assert source.active_version_id == original_version_id
+    assert {version.version_number for version in versions} == {1}
+    assert len(generations) == 1
+    assert generations[0].source_version_id == original_version_id
+    assert generations[0].status == "published"
+    assert list(client.app.state.knowledge_storage.staging.glob("*.part")) == []
 
 
 async def test_reader_cannot_write_and_btp_scope_is_enforced(client: AsyncClient) -> None:

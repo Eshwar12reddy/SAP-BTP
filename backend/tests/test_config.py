@@ -15,6 +15,8 @@ ENV_KEYS = (
     "POSTGRES_PASSWORD",
     "APP_ENV",
     "CORS_ORIGINS",
+    "LANGGRAPH_CHECKPOINT_ENABLED",
+    "LANGGRAPH_CHECKPOINT_DATABASE_URL",
 )
 
 
@@ -141,3 +143,23 @@ def test_refresh_idle_cannot_exceed_absolute_lifetime() -> None:
             REFRESH_IDLE_TTL_SECONDS=10_000,
             SESSION_ABSOLUTE_TTL_SECONDS=5_000,
         )
+
+
+def test_langgraph_checkpointing_requires_a_dedicated_url_when_enabled() -> None:
+    with pytest.raises(SettingsError, match="LANGGRAPH_CHECKPOINT_DATABASE_URL"):
+        load(
+            DATABASE_URL="postgresql://u:p@localhost:5444/btp_agent",
+            LANGGRAPH_CHECKPOINT_ENABLED=True,
+        )
+
+
+def test_langgraph_checkpoint_url_is_separate_from_application_database() -> None:
+    settings = load(
+        DATABASE_URL="postgresql://u:p@localhost:5444/btp_agent",
+        LANGGRAPH_CHECKPOINT_ENABLED=True,
+        LANGGRAPH_CHECKPOINT_DATABASE_URL=(
+            "postgresql://checkpoint:secret@localhost:5444/btp_agent_checkpoints_test"
+        ),
+    )
+    assert settings.database_url.database == "btp_agent"
+    assert settings.langgraph_checkpoint_database_url.database == "btp_agent_checkpoints_test"

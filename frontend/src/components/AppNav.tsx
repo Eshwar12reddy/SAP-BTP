@@ -18,6 +18,12 @@ export function UserMenu({ current, compact = false }: { current: AppView; compa
   const links: { view: AppView; label: string; path: string; visible: boolean }[] = [
     { view: 'chat', label: 'Chat', path: '/', visible: true },
     { view: 'profile', label: 'Profile', path: '/profile', visible: true },
+    { view: 'btp', label: 'BTP connections', path: '/btp', visible: can('btp:connections:read') },
+    { view: 'recommendations', label: 'Service recommendations', path: '/recommendations', visible: can('chat:use') },
+    { view: 'architecture', label: 'Architecture advisor', path: '/architecture', visible: can('chat:use') },
+    { view: 'sizing', label: 'Sizing calculator', path: '/sizing', visible: can('chat:use') },
+    { view: 'infrastructure', label: 'Infrastructure plans', path: '/infrastructure-plans', visible: can('chat:use') },
+    { view: 'knowledge', label: 'Knowledge', path: '/knowledge', visible: can('knowledge:read') },
     { view: 'admin', label: 'Administration', path: '/admin', visible: can('users:read') },
   ]
   return (

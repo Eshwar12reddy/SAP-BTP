@@ -135,7 +135,18 @@ def test_opaque_tokens_are_random_and_only_hashed() -> None:
 
 def test_role_permission_definitions() -> None:
     viewer = ROLE_PERMISSIONS[RoleName.VIEWER]
-    assert viewer == {Permission.CHAT_USE, Permission.BTP_READ}
+    # Phase 11 deliberately lets viewers inspect/select connection metadata, but
+    # never create, update, validate, resolve credentials, or modify BTP state.
+    assert viewer == {
+        Permission.CHAT_USE,
+        Permission.BTP_READ,
+        Permission.BTP_CONNECTIONS_READ,
+        Permission.BTP_ENVIRONMENT_SELECT,
+        Permission.KNOWLEDGE_READ,
+    }
+    assert Permission.BTP_CONNECTIONS_CREATE not in viewer
+    assert Permission.BTP_CONNECTIONS_UPDATE not in viewer
+    assert Permission.BTP_CONNECTIONS_VALIDATE not in viewer
     assert viewer < ROLE_PERMISSIONS[RoleName.OPERATOR]
     assert viewer < ROLE_PERMISSIONS[RoleName.APPROVER]
     assert Permission.APPROVALS_DECIDE not in ROLE_PERMISSIONS[RoleName.OPERATOR]

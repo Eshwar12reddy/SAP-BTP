@@ -15,6 +15,11 @@ from app.schemas.admin import (
     AdminUserSummary,
     AuditEventPage,
     AuditEventRead,
+    BTPAccountCreate,
+    BTPAccountUpdate,
+    BTPEnvironmentCreate,
+    BTPEnvironmentUpdate,
+    BTPHierarchyRead,
     GrantCreate,
     ManageableAccount,
     ManageableEnvironment,
@@ -24,6 +29,7 @@ from app.schemas.admin import (
     UserUpdate,
 )
 from app.schemas.auth import GrantRead, UserRead
+from app.schemas.btp import BTPAccountRead, BTPEnvironmentRead
 from app.services import admin_service
 from app.services.admin_service import AdminContext
 from app.services.grant_view import describe_rows
@@ -41,6 +47,65 @@ def _context(permission: Permission):
         return AdminContext(session, request.app.state.session_factory, principal)
 
     return Depends(dependency)
+
+
+def _account_read(account) -> BTPAccountRead:
+    return BTPAccountRead.model_validate(account, from_attributes=True)
+
+
+def _environment_read(environment) -> BTPEnvironmentRead:
+    return BTPEnvironmentRead.model_validate(environment, from_attributes=True)
+
+
+@router.get("/btp/scopes", response_model=BTPHierarchyRead)
+async def btp_hierarchy(
+    ctx: Annotated[AdminContext, _context(Permission.GRANTS_MANAGE)],
+) -> BTPHierarchyRead:
+    """Platform administrators' configured BTP hierarchy for provisioning and grants."""
+    accounts, environments = await admin_service.list_btp_hierarchy(ctx)
+    return BTPHierarchyRead(
+        accounts=[_account_read(account) for account in accounts],
+        environments=[_environment_read(environment) for environment in environments],
+    )
+
+
+@router.post("/btp/accounts", status_code=status.HTTP_201_CREATED, response_model=BTPAccountRead)
+async def create_btp_account(
+    payload: BTPAccountCreate,
+    ctx: Annotated[AdminContext, _context(Permission.GRANTS_MANAGE)],
+) -> BTPAccountRead:
+    return _account_read(await admin_service.create_btp_account(ctx, payload))
+
+
+@router.patch("/btp/accounts/{account_id}", response_model=BTPAccountRead)
+async def update_btp_account(
+    account_id: uuid.UUID,
+    payload: BTPAccountUpdate,
+    ctx: Annotated[AdminContext, _context(Permission.GRANTS_MANAGE)],
+) -> BTPAccountRead:
+    return _account_read(await admin_service.update_btp_account(ctx, account_id, payload))
+
+
+@router.post(
+    "/btp/accounts/{account_id}/environments",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BTPEnvironmentRead,
+)
+async def create_btp_environment(
+    account_id: uuid.UUID,
+    payload: BTPEnvironmentCreate,
+    ctx: Annotated[AdminContext, _context(Permission.GRANTS_MANAGE)],
+) -> BTPEnvironmentRead:
+    return _environment_read(await admin_service.create_btp_environment(ctx, account_id, payload))
+
+
+@router.patch("/btp/environments/{environment_id}", response_model=BTPEnvironmentRead)
+async def update_btp_environment(
+    environment_id: uuid.UUID,
+    payload: BTPEnvironmentUpdate,
+    ctx: Annotated[AdminContext, _context(Permission.GRANTS_MANAGE)],
+) -> BTPEnvironmentRead:
+    return _environment_read(await admin_service.update_btp_environment(ctx, environment_id, payload))
 
 
 @router.get("/users", response_model=AdminUserPage)

@@ -1,4 +1,9 @@
-# Phase 10: document retrieval
+# Phase 10: optional document retrieval
+
+Document retrieval is a supporting capability of the AI Operations Agent, not a replacement
+for its core chat, routing, authorization, or tool-registry behavior. It is enabled only for
+authorized knowledge scopes and can remain unused without changing the agent's ordinary
+operation.
 
 ## Data flow
 
@@ -13,6 +18,8 @@ Embeddings API with `text-embedding-3-small`. It sends individual child chunks d
 indexing and an individual redacted query during search. It never uploads a file, parent
 context, or prompt. When the switch is false, neither text nor queries are sent to OpenAI.
 DeepSeek remains the reasoning/generation provider and receives no retrieved document data.
+DeepSeek document synthesis is intentionally disabled; the current capability is extractive
+evidence and backend-verified citations.
 
 The retrieval query applies the caller's current Phase 9 Reader grants and active, validated
 source version in SQL before either lexical or vector candidates can be returned. The two
@@ -30,6 +37,14 @@ enable the switch only after approving transmission of authorized chunks and que
 API errors preserve lexical indexing and retrieval where possible; they never log request
 text, response bodies, or credentials.
 
+## Publication contract
+
+An upload is prepared completely before activation: extraction, deterministic chunking, and
+optional embeddings must succeed before the version row, active-version pointer, file object,
+and published index generation commit. The prior active version and published generation are
+kept when preparation fails. Reindexing uses the same generation publication boundary and
+records a durable failed generation without retiring the prior published generation.
+
 Migration `a17b6c8d4e21` adds index-generation, parent, and child tables. It requires the
 PostgreSQL `vector` extension to already exist and does not create it. The isolated test
 fixture enables the extension only in a database whose name ends in `_test`. The main
@@ -40,6 +55,8 @@ must separately approve enabling the extension and applying this migration there
 
 - Cross-encoder reranking remains disabled until a specific model and runtime budget are
   approved. The retrieval response reports this state.
+- OpenAI embeddings are optional and disabled by default. When enabled, only redacted child
+  chunks and redacted search queries are sent to the shared embeddings adapter.
 - Knowledge search returns extractive evidence and verified references. Private parent
   context and retrieved excerpts are not sent to DeepSeek. Using them to compose answers
   requires a separate data-sharing approval and permission-revalidation design for stored

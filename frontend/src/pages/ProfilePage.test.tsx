@@ -50,4 +50,5 @@ describe('ProfilePage', () => {
     expect(await screen.findByText('You have been signed out on all devices.')).toBeInTheDocument()
     expect(backend.callsTo('POST', '/api/v1/auth/logout-all')).toHaveLength(1)
   })
+
 })

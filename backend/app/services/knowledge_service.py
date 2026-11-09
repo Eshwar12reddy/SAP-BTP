@@ -39,6 +39,7 @@ from app.core.exceptions import (
     PermissionDeniedError,
     ServiceUnavailableError,
 )
+from app.integrations.openai_embeddings import OpenAIEmbeddingsClient
 from app.knowledge.storage import (
     AsyncReader,
     EmptyUpload,
@@ -53,7 +54,6 @@ from app.knowledge.validation import (
     clean_filename,
     validate_document,
 )
-from app.integrations.openai_embeddings import OpenAIEmbeddingsClient
 from app.models import (
     BTPAccount,
     BTPEnvironment,
@@ -63,10 +63,10 @@ from app.models import (
     SourceStatus,
     ValidationStatus,
 )
+from app.safety.redaction import Redactor
 from app.schemas.knowledge import SourceRegistration, SourceRemoval, SourceUpdate
 from app.services import audit_service
 from app.services.audit_service import AuditEventType, Outcome
-from app.safety.redaction import Redactor
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +329,52 @@ async def _receive(
     return staged, media_type
 
 
+async def _prepare_upload_index(
+    ctx: KnowledgeContext,
+    staged: StagedFile,
+    media_type: str,
+    *,
+    scope: dict[str, object],
+    source_id: uuid.UUID | None = None,
+):
+    """Prepare a complete index before an upload can become active."""
+    from app.rag.indexing import IndexContext, IndexPreparationError, prepare_index_artifacts
+
+    try:
+        return await prepare_index_artifacts(
+            IndexContext(
+                session_factory=ctx.session_factory,
+                principal=ctx.principal,
+                storage=ctx.storage,
+                settings=ctx.settings,
+                embedding_client=ctx.embedding_client,
+                redactor=ctx.redactor,
+            ),
+            staged.path,
+            media_type,
+        )
+    except IndexPreparationError as exc:
+        ctx.storage.discard(staged)
+        details: dict[str, object] = {"reason": exc.code, "filename": staged.path.name}
+        if source_id is not None:
+            details["source_id"] = str(source_id)
+        await audit_service.record_standalone(
+            ctx.session_factory,
+            AuditEventType.KNOWLEDGE_INDEX_FAILED,
+            Outcome.FAILURE,
+            actor_user_id=ctx.actor_id,
+            details=details,
+            **scope,
+        )
+        raise ServiceUnavailableError(
+            "The document could not be indexed; no version was activated.",
+            code="knowledge_index_failed",
+        ) from None
+    except BaseException:
+        ctx.storage.discard(staged)
+        raise
+
+
 async def _commit_with_object(
     ctx: KnowledgeContext, staged: StagedFile, key: str, write: Callable[[], Awaitable[None]]
 ) -> None:
@@ -481,6 +527,7 @@ async def register_source(
         active_version_status=ValidationStatus.VALIDATED.value,
         **scope,
     )
+    prepared = await _prepare_upload_index(ctx, staged, media_type, scope=scope)
 
     async def write() -> None:
         # Version first: its source_id foreign key is checked at commit (deferred), while
@@ -489,6 +536,9 @@ async def register_source(
         await ctx.session.flush()
         ctx.session.add(source)
         await ctx.session.flush()
+        from app.rag.indexing import publish_index_artifacts
+
+        await publish_index_artifacts(ctx.session, source, version, prepared)
         audit_service.record(
             ctx.session,
             AuditEventType.KNOWLEDGE_SOURCE_CREATED,
@@ -500,7 +550,6 @@ async def register_source(
         _record_version_events(ctx, source, version)
 
     await _commit_with_object(ctx, staged, key, write)
-    await _index_active_source(ctx, source.id)
     return source, version
 
 
@@ -520,6 +569,9 @@ async def upload_version(
     display_name = clean_filename(filename)
     staged, media_type = await _receive(
         ctx, upload, display_name, audit_scope=scope, source_id=source.id
+    )
+    prepared = await _prepare_upload_index(
+        ctx, staged, media_type, scope=scope, source_id=source.id
     )
     key = ctx.storage.new_key()
     created: list[KnowledgeSourceVersion] = []
@@ -561,6 +613,9 @@ async def upload_version(
         locked.active_version_status = ValidationStatus.VALIDATED.value
         locked.revision += 1
         await ctx.session.flush()
+        from app.rag.indexing import publish_index_artifacts
+
+        await publish_index_artifacts(ctx.session, locked, version, prepared)
         _record_version_events(
             ctx, locked, version, previous_version_id=str(previous.id) if previous else None
         )
@@ -568,25 +623,7 @@ async def upload_version(
 
     await _commit_with_object(ctx, staged, key, write)
     await ctx.session.refresh(source)
-    await _index_active_source(ctx, source.id)
     return source, created[0]
-
-
-async def _index_active_source(ctx: KnowledgeContext, source_id: uuid.UUID) -> None:
-    """Index after the source/version commit; failed indexing never hides the upload."""
-    from app.rag.indexing import IndexContext, index_active_source
-
-    await index_active_source(
-        IndexContext(
-            session_factory=ctx.session_factory,
-            principal=ctx.principal,
-            storage=ctx.storage,
-            settings=ctx.settings,
-            embedding_client=ctx.embedding_client,
-            redactor=ctx.redactor,
-        ),
-        source_id,
-    )
 
 
 # ---------- metadata and removal ----------

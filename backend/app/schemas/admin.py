@@ -9,6 +9,7 @@ from app.auth.passwords import MAX_PASSWORD_LENGTH
 from app.auth.permissions import RoleName, ScopeType
 from app.models.user import DISPLAY_NAME_MAX_LENGTH, EMAIL_MAX_LENGTH
 from app.schemas.auth import GrantRead, UserRead
+from app.schemas.btp import BTPAccountRead, BTPEnvironmentRead
 
 
 def _clean_display_name(value: str) -> str:
@@ -122,3 +123,53 @@ class ManageableScopes(BaseModel):
     platform: bool
     accounts: list[ManageableAccount]
     environments: list[ManageableEnvironment]
+
+
+class BTPAccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+    account_type: str
+    region: str | None = Field(default=None, max_length=50)
+    parent_account_id: uuid.UUID | None = None
+
+    @field_validator("external_account_id", "name", "account_type", "region")
+    @classmethod
+    def _trim(cls, value: str | None) -> str | None:
+        return " ".join(value.split()) if value is not None else None
+
+
+class BTPAccountUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+    region: str | None = Field(default=None, max_length=50)
+
+    @field_validator("external_account_id", "name", "region")
+    @classmethod
+    def _trim(cls, value: str | None) -> str | None:
+        return " ".join(value.split()) if value is not None else None
+
+
+class BTPEnvironmentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    runtime_type: str = Field(min_length=1, max_length=100)
+    external_runtime_id: str | None = Field(default=None, max_length=255)
+
+    @field_validator("name", "runtime_type", "external_runtime_id")
+    @classmethod
+    def _trim(cls, value: str | None) -> str | None:
+        return " ".join(value.split()) if value is not None else None
+
+
+class BTPEnvironmentUpdate(BTPEnvironmentCreate):
+    pass
+
+
+class BTPHierarchyRead(BaseModel):
+    accounts: list[BTPAccountRead]
+    environments: list[BTPEnvironmentRead]

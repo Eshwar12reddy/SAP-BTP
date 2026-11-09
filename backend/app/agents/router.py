@@ -14,8 +14,9 @@ import re
 from pydantic import field_validator
 
 from app.agents.contracts import Route, RoutingDecision, RoutingMethod
+from app.agents.prompt_builder import AgentPromptBuilder
 from app.integrations.deepseek_client import DeepSeekClient
-from app.safety.input_guard import TrustLevel, UntrustedContent, build_messages
+from app.safety.input_guard import TrustLevel, UntrustedContent
 from app.safety.output_validation import (
     ModelOutputError,
     StrictModelOutput,
@@ -49,6 +50,22 @@ _SIZING = re.compile(
     r"rps|throughput|how\s+much\s+(memory|ram|cpu|disk))\b",
     re.IGNORECASE,
 )
+_RECOMMENDATIONS = (
+    re.compile(r"\b(which|what|recommend|suggest|suitable|best)\b.{0,50}\b(service(?!\s+(?:instance|binding|key|broker))|services|plan|plans)\b", re.IGNORECASE),
+    re.compile(r"\b(?:use|choose|compare)\b.{0,60}\b(integration\s+suite|hana\s+cloud|event\s+mesh|ai\s+core|destination|connectivity)\b", re.IGNORECASE),
+)
+_ARCHITECTURE_ADVISOR = (
+    re.compile(r"\b(?:sap\s+btp|btp)\b.{0,80}\barchitecture\b", re.IGNORECASE),
+    re.compile(r"\barchitecture\s+(?:proposal|blueprint|advisor|review|graph|diagram)\b", re.IGNORECASE),
+)
+_SIZING_ADVISOR = (
+    re.compile(r"\b(?:sap\s+btp|btp|cloud\s+foundry|kyma|abap|hana)\b.{0,100}\b(?:sizing|size|capacity|memory|instances?|storage|quota)\b", re.IGNORECASE),
+    re.compile(r"\b(?:calculate|calculate the|resource sizing|resource requirements|memory allocation|storage projection|quota impact|traffic doubles)\b", re.IGNORECASE),
+)
+_INFRASTRUCTURE_PLAN = re.compile(
+    r"\b(generate|create|show|build|prepare|update)\b.{0,80}\b(manifest|mta(?:\.ya?ml|\s+descriptor)?|terraform|infrastructure\s+(?:plan|configuration)|configuration\s+files?)\b",
+    re.IGNORECASE,
+)
 _ARCHITECTURE = re.compile(
     r"\b(architecture|architect|reference\s+design|design\s+(a|an|the|our|my)|recommend|"
     r"suggest|best\s+practices?|how\s+should\s+(we|i)|best\s+way|scalable|"
@@ -64,10 +81,34 @@ _APPLICATIONS = (
     ),
     re.compile(rf"\b(what|my|our)\s+{_APP}\b", re.IGNORECASE),
 )
+_DIAGNOSIS = (
+    re.compile(
+        rf"\b(why|diagnos(?:e|is)|root\s+cause|troubleshoot|instability|crash(?:ed|es|ing)?|"
+        rf"fewer\s+instances?|instance\s+count|deployment\s+failed|health\s+check)\b.*\b{_APP}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_APP}\b.*\b(why|diagnos(?:e|is)|stopped|crashed|fewer\s+instances?|"
+        rf"instability|root\s+cause|deployment\s+failed|health\s+check)\b",
+        re.IGNORECASE,
+    ),
+)
 _ACCOUNT_NOUN = r"(global\s+accounts?|sub-?accounts?|accounts?|environments?|spaces?|orgs?)"
 _ACCOUNTS = re.compile(
     rf"\b(show|list|display|which|available|my|our|have\s+access|can\s+i\s+(see|access)|"
     rf"do\s+i\s+have)\b.*\b{_ACCOUNT_NOUN}\b",
+    re.IGNORECASE,
+)
+_INVENTORY = re.compile(
+    r"\b(list|show|display|which|inventory|what\s+are|how\s+many)\b.*\b"
+    r"(service\s+(offerings?|plans?|instances?|bindings?)|destinations?|"
+    r"entitlements?|quotas?|cloud\s+foundry\s+(orgs?|organizations?|spaces?))\b",
+    re.IGNORECASE,
+)
+_HEALTH = re.compile(
+    r"\b(stopped|crashed|failing|failed|problems?|unhealthy|health|quota\s+(pressure|exhaust|usage)|"
+    r"memory\s+(usage|utili[sz]ation)|instance(s)?\s+(missing|unavailable|down)|"
+    r"potentially\s+unused|unused\s+(service|resource))\b",
     re.IGNORECASE,
 )
 _DOCUMENTATION = re.compile(
@@ -84,11 +125,18 @@ _QUESTION = re.compile(
 )
 
 _RULES: tuple[tuple[Route, tuple[re.Pattern[str], ...]], ...] = (
+    (Route.BTP_INFRASTRUCTURE_PLAN, (_INFRASTRUCTURE_PLAN,)),
     (Route.OPERATION_REQUEST, (_OPERATION,)),
     (Route.KNOWLEDGE_SEARCH, (_KNOWLEDGE_SEARCH,)),
+    (Route.BTP_RECOMMENDATIONS, _RECOMMENDATIONS),
+    (Route.BTP_ARCHITECTURE, _ARCHITECTURE_ADVISOR),
+    (Route.BTP_SIZING, _SIZING_ADVISOR),
     (Route.SIZING, (_SIZING,)),
     (Route.ARCHITECTURE, (_ARCHITECTURE,)),
+    (Route.BTP_DIAGNOSIS, _DIAGNOSIS),
+    (Route.BTP_HEALTH, (_HEALTH,)),
     (Route.BTP_APPLICATIONS, _APPLICATIONS),
+    (Route.BTP_INVENTORY, (_INVENTORY,)),
     (Route.BTP_ACCOUNT, (_ACCOUNTS,)),
     (Route.DOCUMENTATION, (_DOCUMENTATION,)),
     (Route.GENERAL_KNOWLEDGE, (_QUESTION,)),
@@ -101,6 +149,13 @@ _CLASSIFIER_PROMPT = (
     "KNOWLEDGE_SEARCH: search the user's authorized uploaded knowledge documents.\n"
     "BTP_ACCOUNT: list the user's own BTP accounts, subaccounts or environments.\n"
     "BTP_APPLICATIONS: list or check applications in the user's environments.\n"
+    "BTP_INVENTORY: retrieve authorized live Cloud Foundry inventory such as organizations, spaces, service offerings, service plans or quotas.\n"
+    "BTP_HEALTH: analyze authorized live application health, process evidence, quota pressure or potentially unused resources.\n"
+    "BTP_DIAGNOSIS: diagnose one explicitly identified application from live authorized evidence.\n"
+    "BTP_RECOMMENDATIONS: analyze requirements and recommend or compare documented SAP BTP services; do not infer entitlement, prices or plans.\n"
+    "BTP_ARCHITECTURE: generate or revise a structured SAP BTP architecture proposal with validated components, connections, environments, security controls and evidence.\n"
+    "BTP_SIZING: calculate deterministic resource sizing from explicit inputs, formulas and authorized evidence; never invent workload, quota or benchmark values.\n"
+    "BTP_INFRASTRUCTURE_PLAN: generate or validate static Cloud Foundry manifests, MTA descriptors or limited SAP/btp Terraform files from authorized architecture and sizing records; never deploy or provision.\n"
     "ARCHITECTURE: design or architecture recommendations.\n"
     "SIZING: capacity, memory, instance or cost estimates.\n"
     "OPERATION_REQUEST: change infrastructure (deploy, restart, scale, delete, configure).\n"
@@ -138,15 +193,24 @@ def parse_classification(output: str) -> Route:
 
 
 async def route_request(
-    text: str, deepseek: DeepSeekClient, redactor: Redactor, *, match_text: str | None = None
+    text: str,
+    deepseek: DeepSeekClient,
+    redactor: Redactor,
+    *,
+    match_text: str | None = None,
+    prompt_builder: AgentPromptBuilder | None = None,
+    context_contents: tuple[UntrustedContent, ...] = (),
 ) -> RoutingDecision:
     """``match_text`` is the normalized form used for rules; ``text`` is what the model sees."""
     route = route_by_rules(match_text if match_text is not None else text)
     if route is not None:
         return RoutingDecision(route=route, method=RoutingMethod.RULE)
-    prompt = build_messages(
+    prompt = (prompt_builder or AgentPromptBuilder()).build(
         _CLASSIFIER_PROMPT,
-        [UntrustedContent(TrustLevel.AUTHENTICATED_USER_INPUT, "user_message", text)],
+        [
+            UntrustedContent(TrustLevel.AUTHENTICATED_USER_INPUT, "user_message", text),
+            *context_contents,
+        ],
         redactor,
     )
     result = await deepseek.chat(prompt.messages, max_tokens=32)

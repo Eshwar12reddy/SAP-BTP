@@ -40,8 +40,9 @@ TEST_JWT_SECRET = "test-only-jwt-secret-0123456789-abcdefghijklmnop"
 # Every table the tests write to; seeded roles/permissions are left alone.
 _DATA_TABLES = (
     "knowledge_child_chunks, knowledge_parent_chunks, knowledge_index_generations, "
-    "knowledge_source_versions, knowledge_sources, messages, conversations, access_grants, session_refresh_tokens, sessions, "
-    "audit_events, auth_login_attempts, btp_environments, btp_accounts, users"
+    "knowledge_source_versions, knowledge_sources, agent_memories, agent_approvals, messages, conversations, access_grants, session_refresh_tokens, sessions, "
+    "audit_events, auth_login_attempts, btp_active_connections, btp_connections, architecture_proposals, sizing_results, "
+    "btp_environments, btp_accounts, users"
 )
 
 

@@ -6,6 +6,7 @@
     btp add-environment          register an environment (label + runtime) in a subaccount
     btp list                     show the configured mapping
     assign-legacy-conversations  give pre-authentication conversations an owner
+    setup-langgraph-checkpoints  explicitly initialize the configured checkpoint database
 
 Passwords are never accepted as arguments (they would land in shell history); they are
 prompted for, or read from stdin with ``--password-stdin``.
@@ -23,6 +24,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.checkpoint import setup_postgres_checkpointer
 from app.auth.passwords import hash_password, password_policy_problems
 from app.auth.permissions import RoleName, ScopeType
 from app.core.config import get_settings
@@ -266,6 +268,26 @@ async def assign_legacy_conversations(session: AsyncSession, args) -> None:
     print(f"Assigned {result.rowcount} conversation(s).")
 
 
+# ---------- LangGraph checkpoints ----------
+
+
+async def setup_langgraph_checkpoints(args) -> None:
+    settings = get_settings()
+    if settings.LANGGRAPH_CHECKPOINT_DATABASE_URL is None:
+        raise CliError(
+            "Set LANGGRAPH_CHECKPOINT_DATABASE_URL to a dedicated checkpoint database first."
+        )
+    database = settings.langgraph_checkpoint_database_url.database or ""
+    if not args.yes:
+        raise CliError("Pass --yes to explicitly initialize checkpoint tables.")
+    if not args.allow_non_test and not database.endswith("_test"):
+        raise CliError(
+            "Refusing to initialize a non-test checkpoint database without --allow-non-test."
+        )
+    await setup_postgres_checkpointer(settings)
+    print(f"Initialized LangGraph checkpoint schema in database {database}.")
+
+
 # ---------- entry point ----------
 
 
@@ -309,6 +331,13 @@ def build_parser() -> argparse.ArgumentParser:
     legacy.add_argument("--conversation-id", action="append")
     legacy.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     legacy.set_defaults(handler=assign_legacy_conversations)
+    checkpoints = commands.add_parser(
+        "setup-langgraph-checkpoints",
+        help="explicitly initialize the configured PostgreSQL checkpoint database",
+    )
+    checkpoints.add_argument("--yes", action="store_true")
+    checkpoints.add_argument("--allow-non-test", action="store_true")
+    checkpoints.set_defaults(handler=setup_langgraph_checkpoints)
     return parser
 
 
@@ -316,7 +345,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
     try:
-        asyncio.run(_run(args.handler, args), loop_factory=loop_factory)
+        if args.command == "setup-langgraph-checkpoints":
+            asyncio.run(args.handler(args), loop_factory=loop_factory)
+        else:
+            asyncio.run(_run(args.handler, args), loop_factory=loop_factory)
     except CliError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

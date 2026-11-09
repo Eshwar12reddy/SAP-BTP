@@ -38,6 +38,11 @@ class Permission(enum.StrEnum):
 
     # BTP permissions: require a grant whose scope covers the resource.
     BTP_READ = "btp:read"
+    BTP_CONNECTIONS_READ = "btp:connections:read"
+    BTP_CONNECTIONS_CREATE = "btp:connections:create"
+    BTP_CONNECTIONS_UPDATE = "btp:connections:update"
+    BTP_CONNECTIONS_VALIDATE = "btp:connections:validate"
+    BTP_ENVIRONMENT_SELECT = "btp:environment:select"
     OPERATIONS_REQUEST = "operations:request"
     OPERATIONS_EXECUTE_LOW_RISK = "operations:execute_low_risk"
     APPROVALS_READ = "approvals:read"
@@ -62,6 +67,11 @@ class Permission(enum.StrEnum):
 PERMISSION_DESCRIPTIONS: dict[Permission, str] = {
     Permission.CHAT_USE: "Use the chat assistant and view own conversations",
     Permission.BTP_READ: "Read authorized SAP BTP accounts, environments and applications",
+    Permission.BTP_CONNECTIONS_READ: "Read authorized BTP connection metadata",
+    Permission.BTP_CONNECTIONS_CREATE: "Register authorized BTP connections",
+    Permission.BTP_CONNECTIONS_UPDATE: "Update and disable authorized BTP connections",
+    Permission.BTP_CONNECTIONS_VALIDATE: "Validate authorized BTP connections",
+    Permission.BTP_ENVIRONMENT_SELECT: "Select an authorized active BTP environment",
     Permission.OPERATIONS_REQUEST: "Request operations on authorized BTP resources",
     Permission.OPERATIONS_EXECUTE_LOW_RISK: "Execute explicitly permitted low-risk operations",
     Permission.APPROVALS_READ: "Read approval requests for authorized resources",
@@ -79,7 +89,15 @@ PERMISSION_DESCRIPTIONS: dict[Permission, str] = {
     Permission.AUDIT_READ: "Review authorized audit records",
 }
 
-_VIEWER = frozenset({Permission.CHAT_USE, Permission.BTP_READ, Permission.KNOWLEDGE_READ})
+_VIEWER = frozenset(
+    {
+        Permission.CHAT_USE,
+        Permission.BTP_READ,
+        Permission.BTP_CONNECTIONS_READ,
+        Permission.BTP_ENVIRONMENT_SELECT,
+        Permission.KNOWLEDGE_READ,
+    }
+)
 KNOWLEDGE_PERMISSIONS = frozenset(
     {
         Permission.KNOWLEDGE_READ,
@@ -92,7 +110,13 @@ KNOWLEDGE_PERMISSIONS = frozenset(
 ROLE_PERMISSIONS: dict[RoleName, frozenset[Permission]] = {
     RoleName.VIEWER: _VIEWER,
     RoleName.OPERATOR: _VIEWER
-    | {Permission.OPERATIONS_REQUEST, Permission.OPERATIONS_EXECUTE_LOW_RISK},
+    | {
+        Permission.OPERATIONS_REQUEST,
+        Permission.OPERATIONS_EXECUTE_LOW_RISK,
+        Permission.BTP_CONNECTIONS_CREATE,
+        Permission.BTP_CONNECTIONS_UPDATE,
+        Permission.BTP_CONNECTIONS_VALIDATE,
+    },
     RoleName.APPROVER: _VIEWER | {Permission.APPROVALS_READ, Permission.APPROVALS_DECIDE},
     # Deliberately no BTP or chat permissions: administrators manage access, they do not
     # automatically get to read BTP data.
@@ -143,6 +167,11 @@ ADMIN_PERMISSIONS = ROLE_PERMISSIONS[RoleName.ADMINISTRATOR]
 BTP_PERMISSIONS = frozenset(
     {
         Permission.BTP_READ,
+        Permission.BTP_CONNECTIONS_READ,
+        Permission.BTP_CONNECTIONS_CREATE,
+        Permission.BTP_CONNECTIONS_UPDATE,
+        Permission.BTP_CONNECTIONS_VALIDATE,
+        Permission.BTP_ENVIRONMENT_SELECT,
         Permission.OPERATIONS_REQUEST,
         Permission.OPERATIONS_EXECUTE_LOW_RISK,
         Permission.APPROVALS_READ,

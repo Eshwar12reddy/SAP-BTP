@@ -9,7 +9,7 @@ import { useMessageSender } from '../hooks/useMessageSender'
 import { useMessages } from '../hooks/useMessages'
 import { useConversationRoute } from '../routes/conversationRoute'
 import { ApiError, api } from '../services/api'
-import type { AgentReply, Message } from '../types/api'
+import type { AgentReply, ApprovalDecision, InvestigationStatus, Message } from '../types/api'
 
 /** Draft key for the "new chat" state, before a conversation exists. */
 const NEW_CHAT = 'new'
@@ -29,14 +29,29 @@ export function ChatPage() {
   const btp = useBtpContext()
   const { upsert } = conversations
   const { append } = history
+  const [investigation, setInvestigation] = useState<InvestigationStatus | null>(null)
+  const [approvalBusy, setApprovalBusy] = useState(false)
+
+  const refreshInvestigation = useCallback(() => {
+    if (!activeId) {
+      setInvestigation(null)
+      return
+    }
+    api.investigationStatus(activeId).then(setInvestigation).catch(() => setInvestigation(null))
+  }, [activeId])
+
+  useEffect(() => {
+    refreshInvestigation()
+  }, [refreshInvestigation])
 
   const onReply = useCallback(
     (reply: AgentReply) => {
       // Ignored if the user has moved on; reopening the conversation loads it from the server.
       append(reply.message)
       api.getConversation(reply.message.conversation_id).then(upsert).catch(() => undefined)
+      refreshInvestigation()
     },
-    [append, upsert],
+    [append, refreshInvestigation, upsert],
   )
   const { states: replyStates, requestReply, watch, checkNow } = useAgentReply(onReply)
 
@@ -170,6 +185,19 @@ export function ChatPage() {
     }
     // Only a message the server has saved is ever answered.
     await requestReply(conversationId, messageId)
+    refreshInvestigation()
+  }
+
+  const chooseApproval = async (decision: ApprovalDecision) => {
+    const approval = investigation?.pending_approval
+    if (!activeId || !approval || approval.status !== 'pending') return
+    setApprovalBusy(true)
+    try {
+      await api.decideInvestigationApproval(activeId, approval.id, decision)
+      refreshInvestigation()
+    } finally {
+      setApprovalBusy(false)
+    }
   }
 
   const notFound = activeId !== null && history.status === 'not_found'
@@ -208,6 +236,48 @@ export function ChatPage() {
             contextLabel(btp.scopes, active) && <span className="badge badge--muted chat__context">{contextLabel(btp.scopes, active)}</span>
           )}
         </header>
+
+        {investigation?.pending_approval?.status === 'pending' && (
+          <section className="investigation-panel" aria-label="Human approval required">
+            <h2>Approval required</h2>
+            <p>{investigation.pending_approval.operation_summary}</p>
+            <p className="notice">No infrastructure change has been made. The current phase has no executor.</p>
+            <div className="investigation-panel__actions">
+              <button type="button" className="button button--primary" disabled={approvalBusy} onClick={() => void chooseApproval('execute')}>
+                Yes — Execute
+              </button>
+              <button type="button" className="button button--ghost" disabled={approvalBusy} onClick={() => void chooseApproval('cancel')}>
+                No — Cancel
+              </button>
+              <button type="button" className="button button--ghost" disabled={approvalBusy} onClick={() => void chooseApproval('other_approach')}>
+                Other Approach
+              </button>
+              <button type="button" className="button button--ghost" disabled={approvalBusy} onClick={() => void chooseApproval('explain_command')}>
+                Explain Command
+              </button>
+            </div>
+          </section>
+        )}
+
+        {investigation?.pending_approval && investigation.pending_approval.status !== 'pending' && (
+          <section className="investigation-panel" aria-label="Approval result" role="status">
+            <h2>Approval {investigation.pending_approval.status.replaceAll('_', ' ')}</h2>
+            <p>{investigation.pending_approval.result_summary ?? 'No further action is available for this proposal.'}</p>
+          </section>
+        )}
+
+        {investigation && (investigation.findings ?? []).length > 0 && (
+          <section className="investigation-panel" aria-label="Investigation findings">
+            <h2>Investigation findings</h2>
+            {(investigation.findings ?? []).map((finding) => (
+              <article key={finding.finding_id}>
+                <strong>{finding.severity} · {finding.confidence}</strong>
+                <p>{finding.explanation}</p>
+                <small>Evidence: {finding.evidence_refs.join(', ') || 'none'}</small>
+              </article>
+            ))}
+          </section>
+        )}
 
         {notFound ? (
           <div className="chat__state">

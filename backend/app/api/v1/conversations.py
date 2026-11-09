@@ -16,7 +16,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy import func, or_, select
 
+from app.agents.context import assemble_context
 from app.agents.contracts import AgentContext, AgentRequest
+from app.agents.orchestrator import AgentOrchestrator
 from app.auth.authorization import Principal, coverage_for, knowledge_coverage_for
 from app.auth.dependencies import SessionDep, deny, require_permission
 from app.auth.permissions import Permission
@@ -33,10 +35,18 @@ from app.models import (
     ValidationStatus,
 )
 from app.models.message import ReplyStatus
-from app.schemas.agent import AgentReplyMetadata, AgentReplyRead, ReplyStatusRead
+from app.schemas.agent import (
+    AgentReplyMetadata,
+    AgentReplyRead,
+    ApprovalDecisionRead,
+    ApprovalDecisionRequest,
+    ApprovalRead,
+    InvestigationStatusRead,
+    ReplyStatusRead,
+)
 from app.schemas.conversation import ConversationCreate, ConversationPage, ConversationRead
 from app.schemas.message import MessageCreate, MessagePage, MessageRead
-from app.services import conversation_service
+from app.services import approval_service, conversation_service
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +147,99 @@ async def list_conversations(
     )
     return ConversationPage(
         items=[ConversationRead.model_validate(c) for c in conversations], has_more=has_more
+    )
+
+
+@router.get("/{conversation_id}/investigation", response_model=InvestigationStatusRead)
+async def get_investigation_status(
+    conversation_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+    principal: ChatUser,
+) -> InvestigationStatusRead:
+    """Return graph progress without exposing checkpoint contents or starting execution."""
+
+    conversation = await _authorized_conversation(request, session, principal, conversation_id)
+    agent = request.app.state.agent
+    if not isinstance(agent, AgentOrchestrator):
+        thread_id = agent.thread_id(principal.user_id, conversation_id) if hasattr(agent, "thread_id") else ""
+        return InvestigationStatusRead.from_state(thread_id, None)
+    state = await agent.get_status(
+        conversation_id,
+        await _agent_context(request, session, principal, conversation),
+    )
+    pending = None
+    if isinstance(agent, AgentOrchestrator):
+        approval = await approval_service.get_for_thread(
+            session,
+            user_id=principal.user_id,
+            thread_id=agent.thread_id(principal.user_id, conversation_id),
+            conversation_id=conversation_id,
+        )
+        if approval is not None:
+            pending = ApprovalRead.model_validate(approval, from_attributes=True)
+    return InvestigationStatusRead.from_state(agent.thread_id(principal.user_id, conversation_id), state, pending)
+
+
+@router.post("/{conversation_id}/investigation/cancel", response_model=InvestigationStatusRead)
+async def cancel_investigation(
+    conversation_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+    principal: ChatUser,
+) -> InvestigationStatusRead:
+    """Cancel a pending graph run; cancellation never changes infrastructure."""
+
+    conversation = await _authorized_conversation(request, session, principal, conversation_id)
+    agent = request.app.state.agent
+    if not isinstance(agent, AgentOrchestrator):
+        return InvestigationStatusRead.from_state("", None)
+    state = await agent.cancel(
+        conversation_id,
+        await _agent_context(request, session, principal, conversation),
+    )
+    return InvestigationStatusRead.from_state(agent.thread_id(principal.user_id, conversation_id), state)
+
+
+@router.post(
+    "/{conversation_id}/investigation/approvals/{approval_id}/decision",
+    response_model=ApprovalDecisionRead,
+)
+async def decide_investigation_approval(
+    conversation_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    payload: ApprovalDecisionRequest,
+    request: Request,
+    session: SessionDep,
+    principal: ChatUser,
+) -> ApprovalDecisionRead:
+    """Submit one of the four exact human choices for the current proposal.
+
+    The terminal choices resume the same LangGraph thread. Explanations and alternative
+    requests are safe, non-terminal records and leave the proposal pending.
+    """
+    conversation = await _authorized_conversation(request, session, principal, conversation_id)
+    agent = request.app.state.agent
+    if not isinstance(agent, AgentOrchestrator):
+        raise ConflictError("Approval workflow is unavailable.", code="approval_unavailable")
+    thread_id = agent.thread_id(principal.user_id, conversation_id)
+    approval = await approval_service.get_owned(
+        session,
+        approval_id,
+        user_id=principal.user_id,
+        thread_id=thread_id,
+        conversation_id=conversation.id,
+    )
+    if approval is None:
+        raise NotFoundError("Approval not found.")
+    context = await _agent_context(request, session, principal, conversation)
+    approval, result = await agent.resume_approval(
+        conversation_id, context, approval_id, payload.decision
+    )
+    return ApprovalDecisionRead(
+        approval=ApprovalRead.model_validate(approval, from_attributes=True),
+        message=result.content,
+        response=result.content,
     )
 
 
@@ -265,16 +368,13 @@ async def create_reply(
             headers={"Retry-After": str(REPLY_POLL_SECONDS)},
         )
 
-    context = AgentContext(
-        principal=principal,
-        session=session,
-        btp_provider=request.app.state.btp_provider,
-        session_factory=request.app.state.session_factory,
-        settings=request.app.state.settings,
-        embedding_client=request.app.state.openai_embeddings,
-        redactor=request.app.state.redactor,
-        btp_account_id=conversation.btp_account_id,
-        btp_environment_id=conversation.btp_environment_id,
+    context = await _agent_context(
+        request,
+        session,
+        principal,
+        conversation,
+        current_message_id=message.id,
+        query=message.content,
     )
     try:
         # Bounds the claim: a "generating" state older than this is abandoned, not running.
@@ -338,6 +438,53 @@ def _reply_limits(settings: Settings) -> tuple[float, datetime]:
     before which a "generating" claim must have been abandoned."""
     run_limit = 2 * settings.DEEPSEEK_REQUEST_DEADLINE + 60
     return run_limit, datetime.now(UTC) - timedelta(seconds=run_limit + 30)
+
+
+async def _agent_context(
+    request: Request,
+    session: SessionDep,
+    principal: Principal,
+    conversation: Conversation,
+    *,
+    current_message_id: uuid.UUID | None = None,
+    query: str | None = None,
+) -> AgentContext:
+    assembled = await assemble_context(
+        session,
+        principal,
+        conversation_id=conversation.id,
+        current_message_id=current_message_id,
+        query=query or conversation.title or "",
+        btp_account_id=conversation.btp_account_id,
+        btp_environment_id=conversation.btp_environment_id,
+        settings=request.app.state.settings,
+        redactor=request.app.state.redactor,
+    )
+    return AgentContext(
+        principal=principal,
+        session=session,
+        btp_provider=request.app.state.btp_provider,
+        btp_read_service=(
+            request.app.state.btp_read_service
+            if getattr(request.app.state.btp_provider, "name", "unavailable") == "unavailable"
+            else None
+        ),
+        btp_diagnosis_service=request.app.state.btp_diagnosis_service,
+        btp_health_service=request.app.state.btp_health_service,
+        btp_recommendation_service=request.app.state.service_recommendation_service,
+        btp_architecture_service=request.app.state.architecture_advisor_service,
+        btp_sizing_service=request.app.state.sizing_service,
+        infrastructure_plan_service=request.app.state.infrastructure_plan_service,
+        deepseek_client=request.app.state.deepseek_client,
+        session_factory=request.app.state.session_factory,
+        settings=request.app.state.settings,
+        embedding_client=request.app.state.openai_embeddings,
+        redactor=request.app.state.redactor,
+        btp_account_id=conversation.btp_account_id,
+        btp_environment_id=conversation.btp_environment_id,
+        assembled_context=assembled,
+        current_message_id=current_message_id,
+    )
 
 
 async def _record_failure(session: SessionDep, message_id: uuid.UUID) -> None:

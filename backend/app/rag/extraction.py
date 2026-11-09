@@ -11,7 +11,9 @@ from pypdf import PdfReader
 from app.models.knowledge import KnowledgeMediaType
 
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
-_PARAGRAPH = re.compile(r"\S(?:.*?\S)?(?=\n[ \t]*\n|\Z)", re.DOTALL)
+_PARAGRAPH = re.compile(
+    r"\S(?:.*?\S)?(?=(?:\r?\n[ \t]*\r?\n|[ \t\r\n]*\Z))", re.DOTALL
+)
 
 
 @dataclass(frozen=True)

@@ -21,9 +21,9 @@ interface FakeUser {
 }
 
 const PERMISSIONS: Record<RoleName, string[]> = {
-  viewer: ['chat:use', 'btp:read', 'knowledge:read'],
-  operator: ['chat:use', 'btp:read', 'knowledge:read', 'operations:request', 'operations:execute_low_risk'],
-  approver: ['chat:use', 'btp:read', 'knowledge:read', 'approvals:read', 'approvals:decide'],
+  viewer: ['chat:use', 'btp:read', 'btp:connections:read', 'btp:environment:select', 'knowledge:read'],
+  operator: ['chat:use', 'btp:read', 'btp:connections:read', 'btp:connections:create', 'btp:connections:update', 'btp:connections:validate', 'btp:environment:select', 'knowledge:read', 'operations:request', 'operations:execute_low_risk'],
+  approver: ['chat:use', 'btp:read', 'btp:connections:read', 'btp:environment:select', 'knowledge:read', 'approvals:read', 'approvals:decide'],
   administrator: ['users:read', 'users:create', 'users:update', 'users:disable', 'grants:manage', 'sessions:revoke', 'audit:read'],
   knowledge_reader: ['knowledge:read'],
   knowledge_manager: ['knowledge:read', 'knowledge:create', 'knowledge:update', 'knowledge:remove'],

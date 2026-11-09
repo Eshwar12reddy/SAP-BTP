@@ -21,8 +21,47 @@ import type {
   MyScopes,
   Page,
   ReplyStatus,
+  InvestigationStatus,
+  ApprovalDecision,
+  ApprovalDecisionResult,
   TokenResponse,
   User,
+  AvailableEnvironment,
+  BtpConnection,
+  ConnectionValidation,
+  CloudFoundryOrganization,
+  CloudFoundrySpace,
+  CloudFoundryApplication,
+  CloudFoundryServiceInstance,
+  CloudFoundryProcess,
+  CloudFoundryProcessStats,
+  CloudFoundryServiceBinding,
+  CloudFoundryApplicationEvent,
+  CloudFoundryServiceOffering,
+  CloudFoundryServicePlan,
+  CloudFoundryQuota,
+  InventoryStatus,
+  ApplicationDiagnosis,
+  HealthOverview,
+  KnowledgeIndexResult,
+  KnowledgeSearchResponse,
+  KnowledgeSource,
+  KnowledgeVersion,
+  BtpHierarchy,
+  ConfiguredBtpAccount,
+  ConfiguredBtpEnvironment,
+  ServiceRequirementAnalysis,
+  ServiceRecommendationResponse,
+  ServiceComparisonResponse,
+  ArchitectureRequirementsAnalysis,
+  ArchitectureProposal,
+  ArchitectureComparisonResponse,
+  SizingRequirementsAnalysis,
+  SizingResult,
+  SizingComparisonResponse,
+  InfrastructurePlan,
+  InfrastructurePlanRequirementsAnalysis,
+  InfrastructurePlanCompareResponse,
 } from '../types/api'
 
 /**
@@ -119,7 +158,7 @@ async function send(path: string, init: RequestInit, auth: boolean, timeoutMs = 
       credentials,
       headers: {
         Accept: 'application/json',
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(init.headers as Record<string, string> | undefined),
       },
@@ -259,6 +298,23 @@ export const api = {
     return (await request<ReplyStatus>(`/conversations/${enc(conversationId)}/messages/${enc(messageId)}/reply`)).data
   },
 
+  async investigationStatus(conversationId: string): Promise<InvestigationStatus> {
+    return (await request<InvestigationStatus>(`/conversations/${enc(conversationId)}/investigation`)).data
+  },
+
+  async decideInvestigationApproval(
+    conversationId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+  ): Promise<ApprovalDecisionResult> {
+    return (
+      await request<ApprovalDecisionResult>(
+        `/conversations/${enc(conversationId)}/investigation/approvals/${enc(approvalId)}/decision`,
+        json({ decision }),
+      )
+    ).data
+  },
+
   // ---------- administration ----------
 
   admin: {
@@ -291,5 +347,283 @@ export const api = {
     async auditEvents(): Promise<Page<AuditEvent>> {
       return (await request<Page<AuditEvent>>('/admin/audit-events?limit=50')).data
     },
+    async btpHierarchy(): Promise<BtpHierarchy> {
+      return (await request<BtpHierarchy>('/admin/btp/scopes')).data
+    },
+    async createBtpAccount(body: {
+      external_account_id: string
+      name: string
+      account_type: 'global_account' | 'subaccount'
+      region?: string
+      parent_account_id?: string
+    }): Promise<ConfiguredBtpAccount> {
+      return (await request<ConfiguredBtpAccount>('/admin/btp/accounts', { method: 'POST', body: JSON.stringify(body) })).data
+    },
+    async updateBtpAccount(id: string, body: { external_account_id: string; name: string; region?: string }): Promise<ConfiguredBtpAccount> {
+      return (await request<ConfiguredBtpAccount>(`/admin/btp/accounts/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(body) })).data
+    },
+    async createBtpEnvironment(accountId: string, body: { name: string; runtime_type: string; external_runtime_id?: string }): Promise<ConfiguredBtpEnvironment> {
+      return (await request<ConfiguredBtpEnvironment>(`/admin/btp/accounts/${enc(accountId)}/environments`, { method: 'POST', body: JSON.stringify(body) })).data
+    },
+    async updateBtpEnvironment(id: string, body: { name: string; runtime_type: string; external_runtime_id?: string }): Promise<ConfiguredBtpEnvironment> {
+      return (await request<ConfiguredBtpEnvironment>(`/admin/btp/environments/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(body) })).data
+    },
+  },
+
+  // ---------- BTP connections ----------
+
+  async listBtpConnections(): Promise<Page<BtpConnection>> {
+    return (await request<Page<BtpConnection>>('/btp/connections?limit=100')).data
+  },
+  async availableBtpEnvironments(): Promise<Page<AvailableEnvironment>> {
+    return (await request<Page<AvailableEnvironment>>('/btp/environments/available?limit=100')).data
+  },
+  async activeBtpEnvironment(): Promise<{ connection: BtpConnection | null }> {
+    return (await request<{ connection: BtpConnection | null }>('/btp/environments/active')).data
+  },
+  async selectBtpEnvironment(connectionId: string): Promise<{ connection: BtpConnection }> {
+    return (await request<{ connection: BtpConnection }>('/btp/environments/active', {
+      method: 'PUT',
+      body: JSON.stringify({ connection_id: connectionId }),
+    })).data
+  },
+  async createBtpConnection(body: {
+    display_name: string
+    btp_environment_id: string
+    api_endpoint: string
+    credential_reference: string
+    authentication_method: string
+  }): Promise<BtpConnection> {
+    return (await request<BtpConnection>('/btp/connections', { method: 'POST', body: JSON.stringify(body) })).data
+  },
+  async updateBtpConnection(id: string, body: {
+    revision: number
+    display_name?: string
+    api_endpoint?: string
+    credential_reference?: string
+    authentication_method?: string
+  }): Promise<BtpConnection> {
+    return (await request<BtpConnection>(`/btp/connections/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(body) })).data
+  },
+  async disableBtpConnection(id: string): Promise<BtpConnection> {
+    return (await request<BtpConnection>(`/btp/connections/${enc(id)}/disable`, { method: 'POST' })).data
+  },
+  async validateBtpConnection(id: string, live = false): Promise<ConnectionValidation> {
+    return (await request<ConnectionValidation>(`/btp/connections/${enc(id)}/validate`, {
+      method: 'POST',
+      body: JSON.stringify({ live }),
+    })).data
+  },
+
+  // ---------- read-only Cloud Foundry inventory ----------
+
+  async listRuntimeOrganizations(): Promise<Page<CloudFoundryOrganization>> {
+    return (await request<Page<CloudFoundryOrganization>>('/btp/runtime/organizations')).data
+  },
+  async listRuntimeSpaces(organizationId?: string): Promise<Page<CloudFoundrySpace>> {
+    const query = organizationId ? `?organization_id=${enc(organizationId)}` : ''
+    return (await request<Page<CloudFoundrySpace>>(`/btp/runtime/spaces${query}`)).data
+  },
+  async listRuntimeApplications(spaceId?: string): Promise<Page<CloudFoundryApplication>> {
+    const query = spaceId ? `?space_id=${enc(spaceId)}` : ''
+    return (await request<Page<CloudFoundryApplication>>(`/btp/runtime/applications${query}`)).data
+  },
+  async listRuntimeServiceInstances(spaceId?: string): Promise<Page<CloudFoundryServiceInstance>> {
+    const query = spaceId ? `?space_id=${enc(spaceId)}` : ''
+    return (await request<Page<CloudFoundryServiceInstance>>(`/btp/runtime/service-instances${query}`)).data
+  },
+  async listRuntimeServiceOfferings(): Promise<Page<CloudFoundryServiceOffering>> {
+    return (await request<Page<CloudFoundryServiceOffering>>('/btp/runtime/service-offerings')).data
+  },
+  async listRuntimeServicePlans(serviceOfferingId?: string): Promise<Page<CloudFoundryServicePlan>> {
+    const query = serviceOfferingId ? `?service_offering_id=${enc(serviceOfferingId)}` : ''
+    return (await request<Page<CloudFoundryServicePlan>>(`/btp/runtime/service-plans${query}`)).data
+  },
+  async listRuntimeOrganizationQuotas(): Promise<Page<CloudFoundryQuota>> {
+    return (await request<Page<CloudFoundryQuota>>('/btp/runtime/organization-quotas')).data
+  },
+  async listRuntimeSpaceQuotas(): Promise<Page<CloudFoundryQuota>> {
+    return (await request<Page<CloudFoundryQuota>>('/btp/runtime/space-quotas')).data
+  },
+  async getRuntimeDestinationStatus(): Promise<InventoryStatus> {
+    return (await request<InventoryStatus>('/btp/runtime/destinations')).data
+  },
+  async getRuntimeEntitlementStatus(): Promise<InventoryStatus> {
+    return (await request<InventoryStatus>('/btp/runtime/entitlements')).data
+  },
+  async listRuntimeProcesses(applicationId: string): Promise<Page<CloudFoundryProcess>> {
+    return (await request<Page<CloudFoundryProcess>>(`/btp/runtime/applications/${enc(applicationId)}/processes`)).data
+  },
+  async getRuntimeProcessStats(processId: string): Promise<CloudFoundryProcessStats> {
+    return (await request<CloudFoundryProcessStats>(`/btp/runtime/processes/${enc(processId)}/stats`)).data
+  },
+  async listRuntimeServiceBindings(applicationId: string): Promise<Page<CloudFoundryServiceBinding>> {
+    return (await request<Page<CloudFoundryServiceBinding>>(`/btp/runtime/applications/${enc(applicationId)}/service-bindings`)).data
+  },
+  async listRuntimeApplicationEvents(applicationId: string): Promise<Page<CloudFoundryApplicationEvent>> {
+    return (await request<Page<CloudFoundryApplicationEvent>>(`/btp/runtime/applications/${enc(applicationId)}/events`)).data
+  },
+  async diagnoseRuntimeApplication(applicationId: string, expectedServiceInstanceIds: string[] = []): Promise<ApplicationDiagnosis> {
+    const params = new URLSearchParams()
+    for (const serviceId of expectedServiceInstanceIds) params.append('expected_service_instance_id', serviceId)
+    const query = params.toString() ? `?${params.toString()}` : ''
+    return (await request<ApplicationDiagnosis>(`/btp/runtime/applications/${enc(applicationId)}/diagnosis${query}`)).data
+  },
+  async getRuntimeHealthOverview(): Promise<HealthOverview> {
+    return (await request<HealthOverview>('/btp/runtime/health/overview')).data
+  },
+  async getRuntimeApplicationHealth(applicationId: string, expectedRunning?: boolean): Promise<ApplicationDiagnosis> {
+    const query = expectedRunning === undefined ? '' : `?expected_running=${expectedRunning ? 'true' : 'false'}`
+    return (await request<ApplicationDiagnosis>(`/btp/runtime/applications/${enc(applicationId)}/health${query}`)).data
+  },
+
+  // ---------- deterministic SAP BTP service recommendations ----------
+
+  async analyzeServiceRequirements(requestText: string): Promise<ServiceRequirementAnalysis> {
+    return (await request<ServiceRequirementAnalysis>('/btp/service-recommendations/requirements/analyze', {
+      method: 'POST', body: JSON.stringify({ request_text: requestText }),
+    })).data
+  },
+  async recommendServices(body: { request_text?: string; include_live_evidence?: boolean }): Promise<ServiceRecommendationResponse> {
+    return (await request<ServiceRecommendationResponse>('/btp/service-recommendations/recommend', {
+      method: 'POST', body: JSON.stringify(body),
+    })).data
+  },
+  async compareServices(serviceKeys: string[], requestText?: string): Promise<ServiceComparisonResponse> {
+    return (await request<ServiceComparisonResponse>('/btp/service-recommendations/compare', {
+      method: 'POST', body: JSON.stringify({ service_keys: serviceKeys, request_text: requestText }),
+    })).data
+  },
+
+  // ---------- structured SAP BTP architecture advisor ----------
+
+  async analyzeArchitectureRequirements(requestText: string): Promise<ArchitectureRequirementsAnalysis> {
+    return (await request<ArchitectureRequirementsAnalysis>('/btp/architecture-advisor/requirements/analyze', { method: 'POST', body: JSON.stringify({ request_text: requestText }) })).data
+  },
+  async createArchitectureProposal(body: { request_text?: string; include_live_evidence?: boolean; account_id?: string; environment_id?: string }): Promise<ArchitectureProposal> {
+    return (await request<ArchitectureProposal>('/btp/architecture-advisor/proposals', { method: 'POST', body: JSON.stringify(body) })).data
+  },
+  async reviseArchitectureProposal(id: string, body: { request_text?: string; include_live_evidence?: boolean }): Promise<ArchitectureProposal> {
+    return (await request<ArchitectureProposal>(`/btp/architecture-advisor/proposals/${enc(id)}/revisions`, { method: 'POST', body: JSON.stringify(body) })).data
+  },
+  async getArchitectureProposal(id: string): Promise<ArchitectureProposal> {
+    return (await request<ArchitectureProposal>(`/btp/architecture-advisor/proposals/${enc(id)}`)).data
+  },
+  async listArchitectureProposals(): Promise<Page<ArchitectureProposal>> {
+    return (await request<Page<ArchitectureProposal>>('/btp/architecture-advisor/proposals')).data
+  },
+  async validateArchitectureProposal(proposal: ArchitectureProposal): Promise<ArchitectureProposal> {
+    return (await request<ArchitectureProposal>('/btp/architecture-advisor/validate', { method: 'POST', body: JSON.stringify(proposal) })).data
+  },
+  async compareArchitectureProposal(proposal: ArchitectureProposal, alternativeIds: string[] = []): Promise<ArchitectureComparisonResponse> {
+    return (await request<ArchitectureComparisonResponse>('/btp/architecture-advisor/compare', { method: 'POST', body: JSON.stringify({ proposal, alternative_ids: alternativeIds }) })).data
+  },
+
+  // ---------- deterministic SAP BTP sizing ----------
+
+  async analyzeSizingRequirements(requestText: string): Promise<SizingRequirementsAnalysis> {
+    return (await request<SizingRequirementsAnalysis>('/btp/sizing/requirements/analyze', { method: 'POST', body: JSON.stringify({ request_text: requestText }) })).data
+  },
+  async calculateSizing(body: { request_text?: string; requirements?: Record<string, unknown>; scenario_id?: string; persist?: boolean }): Promise<SizingResult> {
+    return (await request<SizingResult>('/btp/sizing/calculate', { method: 'POST', body: JSON.stringify(body) })).data
+  },
+  async calculateSizingForArchitecture(proposalId: string, body: { request_text?: string; requirements?: Record<string, unknown>; scenario_id?: string; persist?: boolean }): Promise<SizingResult> {
+    return (await request<SizingResult>(`/btp/sizing/architecture/${enc(proposalId)}/calculate`, { method: 'POST', body: JSON.stringify(body) })).data
+  },
+  async compareSizingScenarios(scenarios: Array<{ scenario_id: string; name: string; requirements: Record<string, unknown> }>): Promise<SizingComparisonResponse> {
+    return (await request<SizingComparisonResponse>('/btp/sizing/compare', { method: 'POST', body: JSON.stringify({ scenarios }) })).data
+  },
+  async listSizingResults(): Promise<Page<SizingResult>> {
+    return (await request<Page<SizingResult>>('/btp/sizing')).data
+  },
+  async getSizingResult(id: string): Promise<SizingResult> {
+    return (await request<SizingResult>(`/btp/sizing/${enc(id)}`)).data
+  },
+
+  // ---------- static infrastructure plans (Phase 24) ----------
+
+  async analyzeInfrastructurePlan(body: Record<string, unknown>): Promise<InfrastructurePlanRequirementsAnalysis> {
+    return (await request<InfrastructurePlanRequirementsAnalysis>('/btp/infrastructure-plans/requirements/analyze', json(body))).data
+  },
+  async generateInfrastructurePlan(body: Record<string, unknown>): Promise<InfrastructurePlan> {
+    return (await request<InfrastructurePlan>('/btp/infrastructure-plans/generate', json(body))).data
+  },
+  async validateInfrastructurePlan(plan: InfrastructurePlan): Promise<InfrastructurePlan> {
+    return (await request<InfrastructurePlan>('/btp/infrastructure-plans/validate', json(plan))).data
+  },
+  async compareInfrastructurePlan(id: string, leftRevision: number, rightRevision: number): Promise<InfrastructurePlanCompareResponse> {
+    return (await request<InfrastructurePlanCompareResponse>(`/btp/infrastructure-plans/${enc(id)}/compare?left_revision=${leftRevision}&right_revision=${rightRevision}`, { method: 'POST' })).data
+  },
+  async exportInfrastructurePlan(id: string, revision?: number): Promise<Blob> {
+    const token = getAccessToken()
+    const query = revision ? `?revision=${revision}` : ''
+    const response = await fetch(`${API_PREFIX}/btp/infrastructure-plans/${enc(id)}/export${query}`, { credentials, headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    if (!response.ok) throw await toError(response)
+    return response.blob()
+  },
+
+  // ---------- knowledge management and retrieval ----------
+
+  async searchKnowledge(query: string, maxResults = 6): Promise<KnowledgeSearchResponse> {
+    return (await request<KnowledgeSearchResponse>('/knowledge/search', json({ query, max_results: maxResults }))).data
+  },
+  async listKnowledgeSources(options: { query?: string; scopeType?: string } = {}): Promise<Page<KnowledgeSource>> {
+    const params = new URLSearchParams({ limit: '50', offset: '0' })
+    if (options.query?.trim()) params.set('q', options.query.trim())
+    if (options.scopeType) params.set('scope_type', options.scopeType)
+    return (await request<Page<KnowledgeSource>>(`/knowledge/sources?${params}`)).data
+  },
+  async getKnowledgeSource(id: string): Promise<KnowledgeSource> {
+    return (await request<KnowledgeSource>(`/knowledge/sources/${enc(id)}`)).data
+  },
+  async createKnowledgeSource(fields: {
+    title: string
+    description?: string
+    tags?: string[]
+    scope_type: KnowledgeSource['scope_type']
+    scope_id?: string
+    change_note?: string
+    file: File
+  }): Promise<KnowledgeSource> {
+    const form = new FormData()
+    form.set('title', fields.title)
+    form.set('scope_type', fields.scope_type)
+    if (fields.description) form.set('description', fields.description)
+    for (const tag of fields.tags ?? []) form.append('tags', tag)
+    if (fields.scope_id) form.set('scope_id', fields.scope_id)
+    if (fields.change_note) form.set('change_note', fields.change_note)
+    form.set('file', fields.file)
+    return (await request<KnowledgeSource>('/knowledge/sources', { method: 'POST', body: form })).data
+  },
+  async updateKnowledgeSource(id: string, body: { revision: number; title?: string; description?: string; tags?: string[] }): Promise<KnowledgeSource> {
+    return (await request<KnowledgeSource>(`/knowledge/sources/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(body) })).data
+  },
+  async removeKnowledgeSource(id: string, reason: string): Promise<{ id: string; status: KnowledgeSource['status']; removed_at: string; removed_by: string }> {
+    return (await request<{ id: string; status: KnowledgeSource['status']; removed_at: string; removed_by: string }>(`/knowledge/sources/${enc(id)}`, json({ reason }))).data
+  },
+  async uploadKnowledgeVersion(id: string, file: File, changeNote?: string): Promise<KnowledgeVersion> {
+    const form = new FormData()
+    form.set('file', file)
+    if (changeNote) form.set('change_note', changeNote)
+    return (await request<KnowledgeVersion>(`/knowledge/sources/${enc(id)}/versions`, { method: 'POST', body: form })).data
+  },
+  async listKnowledgeVersions(id: string): Promise<Page<KnowledgeVersion>> {
+    return (await request<Page<KnowledgeVersion>>(`/knowledge/sources/${enc(id)}/versions?limit=50&offset=0`)).data
+  },
+  async indexKnowledgeSource(id: string): Promise<KnowledgeIndexResult> {
+    return (await request<KnowledgeIndexResult>(`/knowledge/sources/${enc(id)}/index`, { method: 'POST' })).data
+  },
+  async downloadKnowledgeVersion(sourceId: string, versionId: string): Promise<Blob> {
+    let response = await send(`/knowledge/sources/${enc(sourceId)}/versions/${enc(versionId)}/download`, {}, true, REQUEST_TIMEOUT_MS)
+    if (response.status === 401) {
+      const renewed = await refreshSession()
+      if (!renewed) {
+        notifySessionExpired()
+        throw await toError(response)
+      }
+      response = await send(`/knowledge/sources/${enc(sourceId)}/versions/${enc(versionId)}/download`, {}, true, REQUEST_TIMEOUT_MS)
+    }
+    if (!response.ok) throw await toError(response)
+    return response.blob()
   },
 }

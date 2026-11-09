@@ -41,6 +41,14 @@ describe('login', () => {
     expect(JSON.stringify({ ...window.localStorage })).not.toContain('tok-')
   })
 
+  it('shows an explicit access-not-assigned state for an active user without grants', async () => {
+    backend.addUser('new-user@example.com', [], { name: 'New User' })
+    backend.signIn('new-user@example.com')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Access not assigned' })).toBeInTheDocument()
+    expect(screen.getByText(/no role or BTP scope has been assigned yet/i)).toBeInTheDocument()
+  })
+
   it('shows a generic error on invalid credentials and clears the password', async () => {
     render(<App />)
     await signInThroughForm('viewer@example.com', 'wrong password!!')

@@ -69,7 +69,7 @@ class TooManyRequestsError(AppError):
 
 
 class PayloadTooLargeError(AppError):
-    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
     code = "payload_too_large"
     message = "The upload is larger than the allowed maximum."
 

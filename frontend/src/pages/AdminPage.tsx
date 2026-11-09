@@ -3,14 +3,14 @@ import { useAuth } from '../auth/AuthProvider'
 import { PageShell, ROLE_LABELS } from '../components/AppNav'
 import { GrantTable } from '../components/GrantTable'
 import { ApiError, api } from '../services/api'
-import type { AdminUserDetail, AdminUserSummary, AuditEvent, Grant, ManageableScopes, RoleName, ScopeType } from '../types/api'
+import type { AdminUserDetail, AdminUserSummary, AuditEvent, BtpHierarchy, Grant, ManageableScopes, RoleName, ScopeType } from '../types/api'
 
 const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback)
 const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
 export function AdminPage() {
   const { me, can } = useAuth()
-  const [tab, setTab] = useState<'users' | 'audit'>('users')
+  const [tab, setTab] = useState<'users' | 'audit' | 'btp'>('users')
   return (
     <PageShell view="admin" title="Administration">
       <div className="tabs" role="tablist">
@@ -22,10 +22,103 @@ export function AdminPage() {
             Audit log
           </button>
         )}
+        {can('grants:manage') && (
+          <button type="button" role="tab" aria-selected={tab === 'btp'} className="tabs__tab" onClick={() => setTab('btp')}>
+            BTP scopes
+          </button>
+        )}
       </div>
-      {tab === 'users' ? <UsersPanel currentUserId={me?.user.id ?? ''} /> : <AuditPanel />}
+      {tab === 'users' ? <UsersPanel currentUserId={me?.user.id ?? ''} /> : tab === 'audit' ? <AuditPanel /> : <BtpScopesPanel />}
     </PageShell>
   )
+}
+
+function BtpScopesPanel() {
+  const [hierarchy, setHierarchy] = useState<BtpHierarchy | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [showSetup, setShowSetup] = useState(false)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      setHierarchy(await api.admin.btpHierarchy())
+      setError(null)
+    } catch (e) {
+      setError(errorText(e, 'Could not load BTP scopes.'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const changed = async (message: string) => {
+    setNotice(message)
+    await load()
+  }
+
+  return <section className="admin__scopes">
+    {error && <p className="banner banner--error" role="alert">{error}</p>}
+    {notice && <p className="banner banner--info" role="status">{notice}</p>}
+    <section className="card">
+      <div className="detail__header"><div><h2 className="card__title">Configured BTP scopes</h2><p className="muted">Register the non-secret account hierarchy used for authorization. This does not create accounts in SAP BTP or store credentials.</p></div><button type="button" className="button button--ghost" onClick={() => void load()} disabled={loading}>Refresh</button></div>
+      {loading ? <p className="muted">Loading BTP scopes…</p> : hierarchy && hierarchy.accounts.length === 0 ? <div><p className="muted">No BTP hierarchy is configured. Users cannot receive Viewer, Operator, or Approver access until a scope exists.</p><button type="button" className="button button--primary" onClick={() => setShowSetup(true)}>Configure BTP scopes</button></div> : <ScopeTables hierarchy={hierarchy!} onChanged={changed} />}
+    </section>
+    {showSetup && <BtpScopeForms hierarchy={hierarchy ?? { accounts: [], environments: [] }} onChanged={changed} onClose={() => setShowSetup(false)} />}
+    {hierarchy && hierarchy.accounts.length > 0 && <button type="button" className="button button--ghost" onClick={() => setShowSetup((value) => !value)}>{showSetup ? 'Hide scope forms' : 'Add or edit scopes'}</button>}
+  </section>
+}
+
+function ScopeTables({ hierarchy, onChanged }: { hierarchy: BtpHierarchy; onChanged: (message: string) => Promise<void> }) {
+  const [editingAccount, setEditingAccount] = useState<string | null>(null)
+  const [editingEnvironment, setEditingEnvironment] = useState<string | null>(null)
+  return <>
+    <h3 className="section-title">Accounts and subaccounts</h3>
+    <div className="table-wrap"><table className="table"><thead><tr><th>Name</th><th>Type</th><th>Parent</th><th>Actions</th></tr></thead><tbody>{hierarchy.accounts.map((account) => <tr key={account.id}><td>{account.name}</td><td>{account.account_type}</td><td>{hierarchy.accounts.find((parent) => parent.id === account.parent_account_id)?.name ?? '—'}</td><td><button type="button" className="button button--ghost" onClick={() => setEditingAccount(account.id)}>Edit</button>{editingAccount === account.id && <InlineAccountEdit account={account} onChanged={onChanged} onCancel={() => setEditingAccount(null)} />}</td></tr>)}</tbody></table></div>
+    <h3 className="section-title">Environments</h3>
+    <div className="table-wrap"><table className="table"><thead><tr><th>Name</th><th>Runtime</th><th>Subaccount</th><th>Actions</th></tr></thead><tbody>{hierarchy.environments.map((environment) => <tr key={environment.id}><td>{environment.name}</td><td>{environment.runtime_type}</td><td>{hierarchy.accounts.find((account) => account.id === environment.btp_account_id)?.name ?? '—'}</td><td><button type="button" className="button button--ghost" onClick={() => setEditingEnvironment(environment.id)}>Edit</button>{editingEnvironment === environment.id && <InlineEnvironmentEdit environment={environment} onChanged={onChanged} onCancel={() => setEditingEnvironment(null)} />}</td></tr>)}</tbody></table></div>
+  </>
+}
+
+function BtpScopeForms({ hierarchy, onChanged, onClose }: { hierarchy: BtpHierarchy; onChanged: (message: string) => Promise<void>; onClose: () => void }) {
+  const [accountType, setAccountType] = useState<'global_account' | 'subaccount'>('global_account')
+  const [externalId, setExternalId] = useState('')
+  const [name, setName] = useState('')
+  const [region, setRegion] = useState('')
+  const [parentId, setParentId] = useState('')
+  const [environmentAccount, setEnvironmentAccount] = useState('')
+  const [environmentName, setEnvironmentName] = useState('')
+  const [runtime, setRuntime] = useState('cloudfoundry')
+  const [runtimeId, setRuntimeId] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const submitAccount = async (event: FormEvent) => { event.preventDefault(); setPending(true); setError(null); try { await api.admin.createBtpAccount({ external_account_id: externalId, name, account_type: accountType, region, ...(accountType === 'subaccount' ? { parent_account_id: parentId } : {}) }); setExternalId(''); setName(''); setRegion(''); setParentId(''); await onChanged('BTP account registered. No role was granted automatically.') } catch (e) { setError(errorText(e, 'The BTP account could not be registered.')) } finally { setPending(false) } }
+  const submitEnvironment = async (event: FormEvent) => { event.preventDefault(); setPending(true); setError(null); try { await api.admin.createBtpEnvironment(environmentAccount, { name: environmentName, runtime_type: runtime, external_runtime_id: runtimeId }); setEnvironmentName(''); setRuntimeId(''); await onChanged('BTP environment registered. No role was granted automatically.') } catch (e) { setError(errorText(e, 'The BTP environment could not be registered.')) } finally { setPending(false) } }
+  const globals = hierarchy.accounts.filter((account) => account.account_type === 'global_account')
+  const subs = hierarchy.accounts.filter((account) => account.account_type === 'subaccount')
+  return <section className="card"><div className="detail__header"><h2 className="card__title">Configure BTP scopes</h2><button type="button" className="button button--ghost" onClick={onClose}>Close</button></div>{error && <p className="banner banner--error" role="alert">{error}</p>}<form className="form" onSubmit={submitAccount} aria-label="Register BTP account"><h3 className="section-title">Register account or subaccount</h3><label className="field"><span className="field__label">Type</span><select className="input" value={accountType} onChange={(e) => { setAccountType(e.target.value as 'global_account' | 'subaccount'); setParentId('') }}><option value="global_account">Global account</option><option value="subaccount">Subaccount</option></select></label><label className="field"><span className="field__label">SAP external account ID</span><input className="input" value={externalId} onChange={(e) => setExternalId(e.target.value)} required /></label><label className="field"><span className="field__label">Name</span><input className="input" value={name} onChange={(e) => setName(e.target.value)} required /></label><label className="field"><span className="field__label">Region (optional)</span><input className="input" value={region} onChange={(e) => setRegion(e.target.value)} /></label>{accountType === 'subaccount' && <label className="field"><span className="field__label">Global account parent</span><select className="input" value={parentId} onChange={(e) => setParentId(e.target.value)} required><option value="">Select a global account…</option>{globals.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>}<button type="submit" className="button button--primary" disabled={pending || (accountType === 'subaccount' && !parentId)}>{pending ? 'Saving…' : 'Register account'}</button></form><form className="form" onSubmit={submitEnvironment} aria-label="Register BTP environment"><h3 className="section-title">Register environment</h3><label className="field"><span className="field__label">Subaccount</span><select className="input" value={environmentAccount} onChange={(e) => setEnvironmentAccount(e.target.value)} required><option value="">Select a subaccount…</option>{subs.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label className="field"><span className="field__label">Environment name</span><input className="input" value={environmentName} onChange={(e) => setEnvironmentName(e.target.value)} required /></label><label className="field"><span className="field__label">Runtime</span><select className="input" value={runtime} onChange={(e) => setRuntime(e.target.value)}><option value="cloudfoundry">Cloud Foundry</option><option value="kyma">Kyma</option><option value="abap">ABAP</option><option value="neo">Neo</option></select></label><label className="field"><span className="field__label">External runtime ID (optional)</span><input className="input" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} /></label><button type="submit" className="button button--primary" disabled={pending || !environmentAccount}>{pending ? 'Saving…' : 'Register environment'}</button></form></section>
+}
+
+function InlineAccountEdit({ account, onChanged, onCancel }: { account: BtpHierarchy['accounts'][number]; onChanged: (message: string) => Promise<void>; onCancel: () => void }) {
+  const [name, setName] = useState(account.name)
+  const [externalId, setExternalId] = useState(account.external_account_id)
+  const [region, setRegion] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const save = async (event: FormEvent) => { event.preventDefault(); setPending(true); setError(null); try { await api.admin.updateBtpAccount(account.id, { external_account_id: externalId, name, region }); await onChanged('BTP account updated.'); onCancel() } catch (e) { setError(errorText(e, 'The BTP account could not be updated.')) } finally { setPending(false) } }
+  return <form className="form" onSubmit={save} aria-label={`Edit ${account.name}`}><label className="field"><span className="field__label">Name</span><input className="input" value={name} onChange={(e) => setName(e.target.value)} required /></label><label className="field"><span className="field__label">External ID (blank keeps current)</span><input className="input" value={externalId} onChange={(e) => setExternalId(e.target.value)} /></label><label className="field"><span className="field__label">Region</span><input className="input" value={region} onChange={(e) => setRegion(e.target.value)} /></label>{error && <p className="banner banner--error" role="alert">{error}</p>}<button className="button button--primary" type="submit" disabled={pending}>Save</button><button className="button button--ghost" type="button" onClick={onCancel}>Cancel</button></form>
+}
+
+function InlineEnvironmentEdit({ environment, onChanged, onCancel }: { environment: BtpHierarchy['environments'][number]; onChanged: (message: string) => Promise<void>; onCancel: () => void }) {
+  const [name, setName] = useState(environment.name)
+  const [runtime, setRuntime] = useState(environment.runtime_type)
+  const [externalId, setExternalId] = useState(environment.external_runtime_id ?? '')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const save = async (event: FormEvent) => { event.preventDefault(); setPending(true); setError(null); try { await api.admin.updateBtpEnvironment(environment.id, { name, runtime_type: runtime, external_runtime_id: externalId }); await onChanged('BTP environment updated.'); onCancel() } catch (e) { setError(errorText(e, 'The BTP environment could not be updated.')) } finally { setPending(false) } }
+  return <form className="form" onSubmit={save} aria-label={`Edit ${environment.name}`}><label className="field"><span className="field__label">Name</span><input className="input" value={name} onChange={(e) => setName(e.target.value)} required /></label><label className="field"><span className="field__label">Runtime</span><select className="input" value={runtime} onChange={(e) => setRuntime(e.target.value)}><option value="cloudfoundry">Cloud Foundry</option><option value="kyma">Kyma</option><option value="abap">ABAP</option><option value="neo">Neo</option></select></label><label className="field"><span className="field__label">External runtime ID</span><input className="input" value={externalId} onChange={(e) => setExternalId(e.target.value)} /></label>{error && <p className="banner banner--error" role="alert">{error}</p>}<button className="button button--primary" type="submit" disabled={pending}>Save</button><button className="button button--ghost" type="button" onClick={onCancel}>Cancel</button></form>
 }
 
 // ---------- users ----------

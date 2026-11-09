@@ -1,7 +1,8 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
+import { api } from '../services/api'
 import { FakeBackend } from '../test/fakeBackend'
 
 let backend: FakeBackend
@@ -151,6 +152,14 @@ describe('user management', () => {
     expect(await screen.findByText('You cannot change your own access here.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Disable account' })).not.toBeInTheDocument()
     expect(screen.queryByRole('form', { name: 'Assign role' })).not.toBeInTheDocument()
+  })
+
+  it('shows the configure action when no BTP hierarchy exists', async () => {
+    vi.spyOn(api.admin, 'btpHierarchy').mockResolvedValue({ accounts: [], environments: [] })
+    renderAs('admin@example.com', ['administrator'], '/admin')
+    await userEvent.click(await screen.findByRole('tab', { name: 'BTP scopes' }))
+    expect(await screen.findByText(/No BTP hierarchy is configured/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Configure BTP scopes' })).toBeInTheDocument()
   })
 })
 

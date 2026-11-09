@@ -69,6 +69,36 @@ class Settings(BaseSettings):
     DATABASE_STATEMENT_TIMEOUT_MS: int = Field(default=15_000, ge=100, le=600_000)
     HEALTH_CHECK_TIMEOUT: float = Field(default=3.0, gt=0, le=30)
 
+    # BTP connection management. References map to server-controlled environment
+    # variable names; clients never choose arbitrary process environment variables.
+    BTP_LIVE_VALIDATION_ENABLED: bool = False
+    BTP_CONNECTION_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=60)
+    BTP_CONNECTION_MAX_RETRIES: int = Field(default=1, ge=0, le=3)
+    BTP_VALIDATION_ALLOWED_HOSTS: Annotated[list[str], NoDecode] = []
+    BTP_CREDENTIAL_ENV_MAP: dict[str, str] = {}
+    # Explicit, server-controlled Cloud Foundry tenant mapping. Keys are Phase 11
+    # environment UUIDs; values contain provider GUIDs only, never names inferred by a client.
+    BTP_CLOUD_FOUNDRY_SCOPE_MAP: dict[str, dict[str, list[str]]] = {}
+    BTP_CLOUD_FOUNDRY_MAX_PAGES: int = Field(default=10, ge=1, le=50)
+    BTP_CLOUD_FOUNDRY_MAX_RESULTS: int = Field(default=500, ge=1, le=5000)
+    BTP_CLOUD_FOUNDRY_MAX_RESPONSE_BYTES: int = Field(default=1_048_576, ge=16_384, le=8_388_608)
+    BTP_CLOUD_FOUNDRY_MAX_CONCURRENCY: int = Field(default=4, ge=1, le=16)
+    BTP_CLOUD_FOUNDRY_RETRY_DELAY_CAP_SECONDS: float = Field(default=5.0, ge=0, le=30)
+    BTP_DIAGNOSIS_AI_EXPLANATION_ENABLED: bool = False
+    BTP_DIAGNOSIS_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0, le=120)
+    BTP_DIAGNOSIS_MAX_PROCESSES: int = Field(default=10, ge=1, le=50)
+    BTP_DIAGNOSIS_MAX_EVENTS: int = Field(default=50, ge=1, le=500)
+    BTP_DIAGNOSIS_MAX_EXPECTED_SERVICES: int = Field(default=20, ge=1, le=100)
+    # Health diagnosis thresholds are provider-measurement thresholds, not universal
+    # SAP guarantees. Percentages are only calculated when finite comparable metrics exist.
+    BTP_DIAGNOSIS_MEMORY_WARNING_PERCENT: float = Field(default=80.0, ge=0, le=100)
+    BTP_DIAGNOSIS_MEMORY_CRITICAL_PERCENT: float = Field(default=95.0, ge=0, le=100)
+    BTP_DIAGNOSIS_CPU_WARNING_PERCENT: float = Field(default=80.0, ge=0, le=100)
+    BTP_DIAGNOSIS_QUOTA_WARNING_PERCENT: float = Field(default=80.0, ge=0, le=100)
+    BTP_DIAGNOSIS_QUOTA_CRITICAL_PERCENT: float = Field(default=95.0, ge=0, le=100)
+    BTP_DIAGNOSIS_CRASH_WINDOW_SECONDS: int = Field(default=24 * 3600, ge=60, le=7 * 24 * 3600)
+    BTP_DIAGNOSIS_MAX_APPLICATIONS: int = Field(default=50, ge=1, le=200)
+
     CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:5173"]
 
     # Authentication. JWT_SECRET_KEY is required: there is deliberately no default.
@@ -104,6 +134,25 @@ class Settings(BaseSettings):
     DEEPSEEK_MAX_OUTPUT_TOKENS: int = Field(default=2048, ge=1, le=393_216)
     DEEPSEEK_MAX_INPUT_MESSAGES: int = Field(default=50, ge=1, le=1_000)
     DEEPSEEK_MAX_INPUT_CHARS: int = Field(default=100_000, ge=1, le=4_000_000)
+
+    # LangGraph short-term state. Disabled by default so normal startup never creates
+    # checkpoint tables in the application database. Point this at a separately managed
+    # checkpoint database before enabling it in a deployment.
+    LANGGRAPH_CHECKPOINT_ENABLED: bool = False
+    LANGGRAPH_CHECKPOINT_DATABASE_URL: SecretStr | None = None
+    LANGGRAPH_MAX_ITERATIONS: int = Field(default=12, ge=1, le=50)
+    LANGGRAPH_MAX_TOOL_CALLS: int = Field(default=2, ge=0, le=20)
+    LANGGRAPH_MAX_CHECKPOINT_BYTES: int = Field(default=256 * 1024, ge=16_384, le=4 * 1024 * 1024)
+    LANGGRAPH_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, le=3650)
+
+    # Agent context and long-term memory. Memory uses PostgreSQL metadata/lexical filtering;
+    # embeddings remain optional and are never required for normal memory retrieval.
+    AGENT_CONTEXT_MAX_MESSAGES: int = Field(default=20, ge=4, le=100)
+    AGENT_CONTEXT_MAX_TOKENS: int = Field(default=6_000, ge=1_000, le=25_000)
+    AGENT_CONTEXT_MAX_CHARS: int = Field(default=24_000, ge=4_000, le=100_000)
+    AGENT_MEMORY_MAX_RESULTS: int = Field(default=5, ge=1, le=20)
+    AGENT_MEMORY_MAX_CHARS: int = Field(default=12_000, ge=2_000, le=50_000)
+    AGENT_MEMORY_DEFAULT_TTL_DAYS: int = Field(default=180, ge=1, le=3650)
 
     # OpenAI is used only for embeddings, never chat/reasoning. Off by default because
     # enabling it sends authorized document child chunks and user queries to OpenAI.
@@ -150,6 +199,13 @@ class Settings(BaseSettings):
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):
             return [origin.strip().rstrip("/") for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("BTP_VALIDATION_ALLOWED_HOSTS", mode="before")
+    @classmethod
+    def _split_btp_hosts(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [host.strip() for host in value.split(",") if host.strip()]
         return value
 
     @field_validator("CORS_ORIGINS")
@@ -211,6 +267,15 @@ class Settings(BaseSettings):
             raise ValueError("OPENAI_EMBEDDING_MODEL must be text-embedding-3-small")
         if self.OPENAI_EMBEDDING_DIMENSIONS != 1536:
             raise ValueError("OPENAI_EMBEDDING_DIMENSIONS must be 1536")
+        if self.BTP_DIAGNOSIS_MEMORY_WARNING_PERCENT > self.BTP_DIAGNOSIS_MEMORY_CRITICAL_PERCENT:
+            raise ValueError("BTP_DIAGNOSIS_MEMORY_WARNING_PERCENT must not exceed the critical threshold")
+        if self.BTP_DIAGNOSIS_QUOTA_WARNING_PERCENT > self.BTP_DIAGNOSIS_QUOTA_CRITICAL_PERCENT:
+            raise ValueError("BTP_DIAGNOSIS_QUOTA_WARNING_PERCENT must not exceed the critical threshold")
+        if self.LANGGRAPH_CHECKPOINT_ENABLED and self.LANGGRAPH_CHECKPOINT_DATABASE_URL is None:
+            raise ValueError(
+                "LANGGRAPH_CHECKPOINT_DATABASE_URL is required when "
+                "LANGGRAPH_CHECKPOINT_ENABLED is true"
+            )
         return self
 
     @property
@@ -253,6 +318,22 @@ class Settings(BaseSettings):
         if not url.database:
             raise ValueError("the database URL must name a database")
         return url
+
+    @property
+    def langgraph_checkpoint_database_url(self) -> URL:
+        """Dedicated checkpoint URL; never falls back to the application database."""
+
+        if self.LANGGRAPH_CHECKPOINT_DATABASE_URL is None:
+            raise SettingsError(
+                "LANGGRAPH_CHECKPOINT_DATABASE_URL must be configured for PostgreSQL checkpoints"
+            )
+        try:
+            url = make_url(self.LANGGRAPH_CHECKPOINT_DATABASE_URL.get_secret_value())
+        except (ArgumentError, ValueError):
+            raise SettingsError("LANGGRAPH_CHECKPOINT_DATABASE_URL is not a valid database URL") from None
+        if url.drivername not in _ACCEPTED_SCHEMES:
+            raise SettingsError(f"LANGGRAPH_CHECKPOINT_DATABASE_URL must use the '{DRIVER}' driver")
+        return url.set(drivername=DRIVER)
 
     @property
     def is_development(self) -> bool:

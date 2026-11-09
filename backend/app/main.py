@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.agents.single_agent import SingleAgent
+from app.agents.checkpoint import open_checkpointer
+from app.agents.orchestrator import AgentOrchestrator
 from app.api import health
 from app.api.v1.router import api_router
 from app.auth.cookies import CSRF_HEADER
@@ -30,7 +31,15 @@ from app.integrations.openai_embeddings import OpenAIEmbeddingsClient
 from app.integrations.sap_btp.provider import UnavailableBTPProvider
 from app.knowledge.storage import KnowledgeStorage
 from app.safety.redaction import Redactor
+from app.services.architecture_advisor_service import ArchitectureAdvisorService
+from app.services.cloud_foundry_service import AuthorizedCloudFoundryService
+from app.services.diagnosis_service import CloudFoundryDiagnosisService
+from app.services.health_diagnosis_service import HealthDiagnosisService
+from app.services.infrastructure_plan_service import InfrastructurePlanService
+from app.services.service_recommendation_service import ServiceRecommendationService
+from app.services.sizing_service import SizingService
 from app.tools.btp import register_btp_tools
+from app.tools.infrastructure import register_infrastructure_tools
 from app.tools.knowledge import register_knowledge_tool
 from app.tools.registry import ToolRegistry
 
@@ -58,8 +67,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = engine
         app.state.session_factory = create_session_factory(engine)
         app.state.expected_schema_revision = expected_schema_revision()
-        # No live SAP BTP integration yet; the adapter reports that explicitly.
+        # Keep the legacy provider unavailable; Phase 12 injects its read-only
+        # Cloud Foundry service separately so older adapter tests remain explicit.
         app.state.btp_provider = UnavailableBTPProvider()
+        app.state.btp_read_service = AuthorizedCloudFoundryService(settings)
+        app.state.btp_diagnosis_service = CloudFoundryDiagnosisService(settings)
+        app.state.btp_health_service = HealthDiagnosisService(settings)
+        app.state.service_recommendation_service = ServiceRecommendationService(
+            live_service=app.state.btp_read_service
+        )
+        app.state.architecture_advisor_service = ArchitectureAdvisorService(
+            recommendation_service=app.state.service_recommendation_service,
+            settings=settings,
+        )
+        app.state.sizing_service = SizingService(
+            settings=settings,
+            architecture_service=app.state.architecture_advisor_service,
+            cloud_foundry_service=app.state.btp_read_service,
+        )
+        app.state.infrastructure_plan_service = InfrastructurePlanService(settings=settings)
         # Private document storage; directories are created on first upload.
         app.state.knowledge_storage = KnowledgeStorage(settings.KNOWLEDGE_STORAGE_DIR)
         logger.info("Application starting", extra={"event": "startup", **log_fields})
@@ -96,22 +122,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tool_registry = ToolRegistry(redactor)
         register_btp_tools(tool_registry)
         register_knowledge_tool(tool_registry)
+        register_infrastructure_tools(tool_registry)
         tool_registry.freeze()
         app.state.tool_registry = tool_registry
         app.state.redactor = redactor
-        app.state.agent = SingleAgent(deepseek_client, tool_registry, redactor)
-
-        try:
-            yield
-        finally:
+        async with open_checkpointer(settings) as checkpointer:
+            app.state.checkpointer = checkpointer
+            app.state.agent = AgentOrchestrator(
+                deepseek_client,
+                tool_registry,
+                redactor,
+                checkpointer=checkpointer,
+                settings=settings,
+            )
             try:
-                await embeddings_client.close()
+                yield
             finally:
                 try:
-                    await deepseek_client.close()
+                    await embeddings_client.close()
                 finally:
-                    await engine.dispose()
-            logger.info("Application stopped", extra={"event": "shutdown"})
+                    try:
+                        await deepseek_client.close()
+                    finally:
+                        await engine.dispose()
+                logger.info("Application stopped", extra={"event": "shutdown"})
 
     app = FastAPI(
         title=settings.APP_NAME,
@@ -127,8 +161,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         UploadSizeLimitMiddleware,
         path_prefix=f"{settings.API_V1_PREFIX}/knowledge",
-        # Multipart text fields are individually capped at 16 KiB by Starlette. Reserve
-        # bounded space for the allowed registration fields and multipart framing.
+        # The aggregate request body is bounded before multipart parsing. Pydantic then
+        # bounds the allowed text fields after strict form parsing.
         max_body_bytes=settings.KNOWLEDGE_MAX_UPLOAD_BYTES + 512 * 1024,
     )
     app.add_middleware(RequestContextMiddleware)

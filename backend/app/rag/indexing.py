@@ -41,6 +41,24 @@ class IndexResult:
 
 
 @dataclass(frozen=True)
+class IndexArtifacts:
+    config_version: str
+    parents: list[ChunkedParent]
+    embeddings: list[list[float]] | None
+    embedding_status: str
+    embedding_model_id: str | None
+    embedding_dimensions: int | None
+
+
+class IndexPreparationError(ValueError):
+    """Safe, stable failure raised before a new version or index is committed."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code if code.isascii() and len(code) <= 64 else "indexing_failed"
+
+
+@dataclass(frozen=True)
 class IndexContext:
     session_factory: async_sessionmaker[AsyncSession]
     principal: Principal
@@ -117,107 +135,17 @@ async def index_active_source(ctx: IndexContext, source_id: uuid.UUID) -> IndexR
                         size=version.size_bytes,
                         sha256=version.sha256,
                     )
-                    parents = await asyncio.to_thread(
-                        _extract_and_chunk,
-                        path,
-                        version.media_type,
-                        ctx.settings,
-                        chunk_config,
-                    )
                 except StoredObjectError:
                     failure_code = "source_file_unavailable"
                     await session.rollback()
                     return await _record_failure(ctx, source_id, version_id, failure_code)
-                except (ExtractionError, ValueError) as exc:
-                    failure_code = exc.code if isinstance(exc, ExtractionError) else str(exc)
-                    if not failure_code.isascii() or len(failure_code) > 64:
-                        failure_code = "indexing_failed"
+                try:
+                    artifacts = await prepare_index_artifacts(ctx, path, version.media_type)
+                except IndexPreparationError as exc:
+                    failure_code = exc.code
                     await session.rollback()
                     return await _record_failure(ctx, source_id, version_id, failure_code)
-
-                embeddings: list[list[float]] | None = None
-                embedding_status = "disabled"
-                embedding_model_id = None
-                embedding_dimensions = None
-                embedding_failure = None
-                if ctx.settings.OPENAI_EMBEDDINGS_ENABLED:
-                    embedding_model_id = ctx.settings.OPENAI_EMBEDDING_MODEL
-                    embedding_dimensions = ctx.settings.OPENAI_EMBEDDING_DIMENSIONS
-                    embedding_status = "failed"
-                    children = [child for parent in parents for child in parent.children]
-                    redactor = ctx.redactor or Redactor.from_settings(ctx.settings)
-                    try:
-                        if ctx.embedding_client is None:
-                            raise EmbeddingsError("openai_embeddings_unavailable")
-                        embeddings = await ctx.embedding_client.embed_texts(
-                            [redactor.redact_text(child.text) for child in children]
-                        )
-                        embedding_status = "ready"
-                    except EmbeddingsError as exc:
-                        embedding_failure = str(exc)[:64]
-
-                await session.execute(
-                    update(KnowledgeIndexGeneration)
-                    .where(
-                        KnowledgeIndexGeneration.source_id == source.id,
-                        KnowledgeIndexGeneration.status == IndexStatus.PUBLISHED.value,
-                    )
-                    .values(status=IndexStatus.RETIRED.value)
-                )
-                generation = KnowledgeIndexGeneration(
-                    source_id=source.id,
-                    source_version_id=version.id,
-                    version_validation_status=ValidationStatus.VALIDATED.value,
-                    status=IndexStatus.PUBLISHED.value,
-                    config_version=chunk_config.version,
-                    parent_count=len(parents),
-                    child_count=sum(len(parent.children) for parent in parents),
-                    embedding_model_id=embedding_model_id,
-                    embedding_dimensions=embedding_dimensions,
-                    embedding_status=embedding_status,
-                    failure_code=embedding_failure,
-                    published_at=datetime.now(UTC),
-                )
-                session.add(generation)
-                await session.flush()
-                embedding_index = 0
-                for parent_chunk in parents:
-                    parent = KnowledgeParentChunk(
-                        generation_id=generation.id,
-                        source_id=source.id,
-                        source_version_id=version.id,
-                        parent_order=parent_chunk.order,
-                        section_heading=parent_chunk.heading,
-                        page_start=parent_chunk.page_start,
-                        page_end=parent_chunk.page_end,
-                        source_offset_start=parent_chunk.source_offset_start,
-                        source_offset_end=parent_chunk.source_offset_end,
-                        chunk_text=parent_chunk.text,
-                        token_count=parent_chunk.token_count,
-                        fingerprint=parent_chunk.fingerprint,
-                    )
-                    session.add(parent)
-                    await session.flush()
-                    children_to_add = []
-                    for child in parent_chunk.children:
-                        vector = embeddings[embedding_index] if embeddings is not None else None
-                        embedding_index += 1
-                        children_to_add.append(
-                            KnowledgeChildChunk(
-                                generation_id=generation.id,
-                                parent_id=parent.id,
-                                source_id=source.id,
-                                source_version_id=version.id,
-                                child_order=child.order,
-                                source_offset_start=child.source_offset_start,
-                                source_offset_end=child.source_offset_end,
-                                chunk_text=child.text,
-                                token_count=child.token_count,
-                                fingerprint=child.fingerprint,
-                                embedding=vector,
-                            )
-                        )
-                    session.add_all(children_to_add)
+                generation = await publish_index_artifacts(session, source, version, artifacts)
                 await session.commit()
                 return IndexResult(
                     "published",
@@ -227,6 +155,8 @@ async def index_active_source(ctx: IndexContext, source_id: uuid.UUID) -> IndexR
                 )
     except TimeoutError:
         return await _record_failure(ctx, source_id, version_id, "indexing_timeout")
+    except IndexPreparationError as exc:
+        return await _record_failure(ctx, source_id, version_id, exc.code)
     except Exception:
         logger.exception(
             "Knowledge indexing failed",
@@ -249,6 +179,129 @@ def _extract_and_chunk(
     if not parents:
         raise ExtractionError("insufficient_extractable_text")
     return parents
+
+
+async def prepare_index_artifacts(
+    ctx: IndexContext, path: Path, media_type: str
+) -> IndexArtifacts:
+    """Prepare extraction and embeddings without changing database state."""
+    config = _chunk_config(ctx.settings)
+    try:
+        parents = await asyncio.to_thread(
+            _extract_and_chunk, path, media_type, ctx.settings, config
+        )
+    except ExtractionError as exc:
+        raise IndexPreparationError(exc.code) from None
+    except ValueError:
+        raise IndexPreparationError("indexing_failed") from None
+
+    if not ctx.settings.OPENAI_EMBEDDINGS_ENABLED:
+        return IndexArtifacts(config.version, parents, None, "disabled", None, None)
+
+    children = [child for parent in parents for child in parent.children]
+    redactor = ctx.redactor or Redactor.from_settings(ctx.settings)
+    try:
+        if ctx.embedding_client is None:
+            raise EmbeddingsError("openai_embeddings_unavailable")
+        embeddings = await ctx.embedding_client.embed_texts(
+            [redactor.redact_text(child.text) for child in children]
+        )
+    except EmbeddingsError as exc:
+        code = str(exc)[:64]
+        raise IndexPreparationError(code) from None
+    if len(embeddings) != len(children):
+        raise IndexPreparationError("embedding_count_mismatch")
+    if any(len(vector) != ctx.settings.OPENAI_EMBEDDING_DIMENSIONS for vector in embeddings):
+        raise IndexPreparationError("embedding_dimension_mismatch")
+    return IndexArtifacts(
+        config.version,
+        parents,
+        embeddings,
+        "ready",
+        ctx.settings.OPENAI_EMBEDDING_MODEL,
+        ctx.settings.OPENAI_EMBEDDING_DIMENSIONS,
+    )
+
+
+async def publish_index_artifacts(
+    session: AsyncSession,
+    source: KnowledgeSource,
+    version: KnowledgeSourceVersion,
+    artifacts: IndexArtifacts,
+) -> KnowledgeIndexGeneration:
+    """Persist one complete generation in the caller's transaction.
+
+    The new generation is staged as retired while its chunks are inserted. The previous
+    published generation is retired only after preparation has succeeded, and the new one
+    becomes published before the caller commits. A rollback therefore preserves the old
+    active version and generation together.
+    """
+    parents = artifacts.parents
+    generation = KnowledgeIndexGeneration(
+        source_id=source.id,
+        source_version_id=version.id,
+        version_validation_status=ValidationStatus.VALIDATED.value,
+        status=IndexStatus.RETIRED.value,
+        config_version=artifacts.config_version,
+        parent_count=len(parents),
+        child_count=sum(len(parent.children) for parent in parents),
+        embedding_model_id=artifacts.embedding_model_id,
+        embedding_dimensions=artifacts.embedding_dimensions,
+        embedding_status=artifacts.embedding_status,
+    )
+    session.add(generation)
+    await session.flush()
+    embedding_index = 0
+    for parent_chunk in parents:
+        parent = KnowledgeParentChunk(
+            generation_id=generation.id,
+            source_id=source.id,
+            source_version_id=version.id,
+            parent_order=parent_chunk.order,
+            section_heading=parent_chunk.heading,
+            page_start=parent_chunk.page_start,
+            page_end=parent_chunk.page_end,
+            source_offset_start=parent_chunk.source_offset_start,
+            source_offset_end=parent_chunk.source_offset_end,
+            chunk_text=parent_chunk.text,
+            token_count=parent_chunk.token_count,
+            fingerprint=parent_chunk.fingerprint,
+        )
+        session.add(parent)
+        await session.flush()
+        children_to_add = []
+        for child in parent_chunk.children:
+            vector = artifacts.embeddings[embedding_index] if artifacts.embeddings else None
+            embedding_index += 1
+            children_to_add.append(
+                KnowledgeChildChunk(
+                    generation_id=generation.id,
+                    parent_id=parent.id,
+                    source_id=source.id,
+                    source_version_id=version.id,
+                    child_order=child.order,
+                    source_offset_start=child.source_offset_start,
+                    source_offset_end=child.source_offset_end,
+                    chunk_text=child.text,
+                    token_count=child.token_count,
+                    fingerprint=child.fingerprint,
+                    embedding=vector,
+                )
+            )
+        session.add_all(children_to_add)
+    await session.flush()
+    await session.execute(
+        update(KnowledgeIndexGeneration)
+        .where(
+            KnowledgeIndexGeneration.source_id == source.id,
+            KnowledgeIndexGeneration.status == IndexStatus.PUBLISHED.value,
+        )
+        .values(status=IndexStatus.RETIRED.value)
+    )
+    generation.status = IndexStatus.PUBLISHED.value
+    generation.published_at = datetime.now(UTC)
+    await session.flush()
+    return generation
 
 
 async def _record_failure(
@@ -275,7 +328,18 @@ async def _record_failure(
                 source_version_id=version_id,
                 version_validation_status=ValidationStatus.VALIDATED.value,
                 status=IndexStatus.FAILED.value,
-                config_version=ctx.settings.KNOWLEDGE_INDEX_CONFIG_VERSION,
+                config_version=_chunk_config(ctx.settings).version,
+                embedding_model_id=(
+                    ctx.settings.OPENAI_EMBEDDING_MODEL
+                    if ctx.settings.OPENAI_EMBEDDINGS_ENABLED
+                    else None
+                ),
+                embedding_dimensions=(
+                    ctx.settings.OPENAI_EMBEDDING_DIMENSIONS
+                    if ctx.settings.OPENAI_EMBEDDINGS_ENABLED
+                    else None
+                ),
+                embedding_status=("failed" if ctx.settings.OPENAI_EMBEDDINGS_ENABLED else "disabled"),
                 failure_code=failure_code,
             )
             session.add(generation)

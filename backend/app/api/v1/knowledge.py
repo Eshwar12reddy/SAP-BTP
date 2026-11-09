@@ -68,6 +68,7 @@ _UPLOAD_RESPONSES = {
     **_RESPONSES,
     400: {"description": "Rejected file (file_* codes)", **_ERROR},
     413: {"description": "File larger than KNOWLEDGE_MAX_UPLOAD_BYTES", **_ERROR},
+    503: {"description": "Document indexing unavailable; no version was activated", **_ERROR},
 }
 
 
@@ -108,9 +109,9 @@ async def _upload_form(request: Request, allowed: frozenset[str]) -> tuple[dict,
     """Strictly parse a multipart upload: one ``file`` plus only the allowed text fields."""
     if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         raise _invalid([_error("body", "Send multipart/form-data with a 'file' field.", "type_error")])
-    form = await request.form(
-        max_files=1, max_fields=len(allowed) + MAX_TAGS + 1, max_part_size=16 * 1024
-    )
+    # Starlette 0.41 supports aggregate file/field limits here; body size is bounded by
+    # UploadSizeLimitMiddleware and text-field lengths are bounded by the Pydantic models.
+    form = await request.form(max_files=1, max_fields=len(allowed) + MAX_TAGS + 1)
     errors = [
         _error(key, "Unexpected field.", "extra_forbidden")
         for key in sorted(set(form.keys()) - allowed - {"file"})[:10]

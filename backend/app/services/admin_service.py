@@ -33,20 +33,211 @@ from app.core.exceptions import (
 )
 from app.models import (
     AccessGrant,
+    AccountType,
     AuditEvent,
     BTPAccount,
     BTPEnvironment,
     Role,
+    RuntimeType,
     Session,
     User,
 )
-from app.schemas.admin import GrantCreate, UserCreate, UserUpdate
+from app.schemas.admin import (
+    BTPAccountCreate,
+    BTPAccountUpdate,
+    BTPEnvironmentCreate,
+    BTPEnvironmentUpdate,
+    GrantCreate,
+    UserCreate,
+    UserUpdate,
+)
 from app.services import audit_service
 from app.services.audit_service import AuditEventType, Outcome
 from app.services.auth_service import revoke_sessions
 
 USER_NOT_FOUND = "User not found."
 GRANT_NOT_FOUND = "Grant not found."
+BTP_ACCOUNT_NOT_FOUND = "BTP account not found."
+BTP_ENVIRONMENT_NOT_FOUND = "BTP environment not found."
+
+
+async def list_btp_hierarchy(ctx: AdminContext) -> tuple[list[BTPAccount], list[BTPEnvironment]]:
+    """Return the configured hierarchy to a platform administrator only."""
+    await _require_platform(ctx, Permission.GRANTS_MANAGE)
+    accounts = list(await ctx.session.scalars(select(BTPAccount).order_by(BTPAccount.name, BTPAccount.id)))
+    environments = list(
+        await ctx.session.scalars(
+            select(BTPEnvironment).order_by(BTPEnvironment.name, BTPEnvironment.id)
+        )
+    )
+    return accounts, environments
+
+
+async def create_btp_account(ctx: AdminContext, data: BTPAccountCreate) -> BTPAccount:
+    """Register one global account or subaccount; never assigns access automatically."""
+    await _require_platform(ctx, Permission.GRANTS_MANAGE)
+    if data.account_type not in {AccountType.GLOBAL_ACCOUNT.value, AccountType.SUBACCOUNT.value}:
+        raise BadRequestError("account_type must be global_account or subaccount.", code="invalid_account_type")
+    if data.account_type == AccountType.GLOBAL_ACCOUNT.value:
+        if data.parent_account_id is not None:
+            raise BadRequestError("Global accounts cannot have a parent account.", code="invalid_hierarchy")
+        parent_type = None
+    else:
+        if data.parent_account_id is None:
+            raise BadRequestError("Subaccounts require a global-account parent.", code="invalid_hierarchy")
+        parent = await ctx.session.get(BTPAccount, data.parent_account_id)
+        if parent is None or parent.account_type != AccountType.GLOBAL_ACCOUNT.value:
+            raise NotFoundError(BTP_ACCOUNT_NOT_FOUND)
+        parent_type = AccountType.GLOBAL_ACCOUNT.value
+    if await ctx.session.scalar(select(BTPAccount.id).where(BTPAccount.external_account_id == data.external_account_id)):
+        raise ConflictError("A BTP account with this external id already exists.", code="btp_account_exists")
+    row = BTPAccount(
+        id=uuid.uuid4(),
+        external_account_id=data.external_account_id,
+        name=data.name,
+        account_type=data.account_type,
+        region=data.region or None,
+        parent_account_id=data.parent_account_id,
+        parent_account_type=parent_type,
+    )
+    ctx.session.add(row)
+    await ctx.session.flush()
+    audit_service.record(
+        ctx.session,
+        AuditEventType.BTP_MAPPING_CHANGED,
+        Outcome.SUCCESS,
+        actor_user_id=ctx.actor_id,
+        btp_account_id=row.id,
+        details={"via": "admin_api", "action": "account_created", "account_type": row.account_type},
+    )
+    try:
+        await ctx.session.commit()
+    except IntegrityError:
+        await ctx.session.rollback()
+        raise ConflictError("A BTP account with this external id already exists.", code="btp_account_exists") from None
+    return row
+
+
+async def update_btp_account(ctx: AdminContext, account_id: uuid.UUID, data: BTPAccountUpdate) -> BTPAccount:
+    await _require_platform(ctx, Permission.GRANTS_MANAGE)
+    row = await ctx.session.get(BTPAccount, account_id)
+    if row is None:
+        raise NotFoundError(BTP_ACCOUNT_NOT_FOUND)
+    duplicate = await ctx.session.scalar(
+        select(BTPAccount.id).where(
+            BTPAccount.external_account_id == data.external_account_id,
+            BTPAccount.id != account_id,
+        )
+    )
+    if duplicate:
+        raise ConflictError("A BTP account with this external id already exists.", code="btp_account_exists")
+    row.external_account_id = data.external_account_id
+    row.name = data.name
+    row.region = data.region or None
+    audit_service.record(
+        ctx.session,
+        AuditEventType.BTP_MAPPING_CHANGED,
+        Outcome.SUCCESS,
+        actor_user_id=ctx.actor_id,
+        btp_account_id=row.id,
+        details={"via": "admin_api", "action": "account_updated"},
+    )
+    await ctx.session.commit()
+    return row
+
+
+async def create_btp_environment(
+    ctx: AdminContext, account_id: uuid.UUID, data: BTPEnvironmentCreate
+) -> BTPEnvironment:
+    await _require_platform(ctx, Permission.GRANTS_MANAGE)
+    account = await ctx.session.get(BTPAccount, account_id)
+    if account is None or account.account_type != AccountType.SUBACCOUNT.value:
+        raise NotFoundError(BTP_ACCOUNT_NOT_FOUND)
+    if data.runtime_type not in {runtime.value for runtime in RuntimeType}:
+        raise BadRequestError("Unsupported runtime type.", code="invalid_runtime_type")
+    same_name = await ctx.session.scalar(
+        select(BTPEnvironment.id).where(BTPEnvironment.btp_account_id == account_id, BTPEnvironment.name == data.name)
+    )
+    if same_name:
+        raise ConflictError("An environment with this name already exists in the subaccount.", code="btp_environment_exists")
+    if data.external_runtime_id:
+        same_external = await ctx.session.scalar(
+            select(BTPEnvironment.id).where(
+                BTPEnvironment.runtime_type == data.runtime_type,
+                BTPEnvironment.external_runtime_id == data.external_runtime_id,
+            )
+        )
+        if same_external:
+            raise ConflictError("An environment with this runtime id already exists.", code="btp_environment_exists")
+    row = BTPEnvironment(
+        id=uuid.uuid4(),
+        btp_account_id=account.id,
+        btp_account_type=AccountType.SUBACCOUNT.value,
+        name=data.name,
+        runtime_type=data.runtime_type,
+        external_runtime_id=data.external_runtime_id or None,
+    )
+    ctx.session.add(row)
+    await ctx.session.flush()
+    audit_service.record(
+        ctx.session,
+        AuditEventType.BTP_MAPPING_CHANGED,
+        Outcome.SUCCESS,
+        actor_user_id=ctx.actor_id,
+        btp_account_id=account.id,
+        btp_environment_id=row.id,
+        details={"via": "admin_api", "action": "environment_created", "runtime_type": row.runtime_type},
+    )
+    try:
+        await ctx.session.commit()
+    except IntegrityError:
+        await ctx.session.rollback()
+        raise ConflictError("An environment with this name or runtime id already exists.", code="btp_environment_exists") from None
+    return row
+
+
+async def update_btp_environment(
+    ctx: AdminContext, environment_id: uuid.UUID, data: BTPEnvironmentUpdate
+) -> BTPEnvironment:
+    await _require_platform(ctx, Permission.GRANTS_MANAGE)
+    row = await ctx.session.get(BTPEnvironment, environment_id)
+    if row is None:
+        raise NotFoundError(BTP_ENVIRONMENT_NOT_FOUND)
+    if data.runtime_type not in {runtime.value for runtime in RuntimeType}:
+        raise BadRequestError("Unsupported runtime type.", code="invalid_runtime_type")
+    same_name = await ctx.session.scalar(
+        select(BTPEnvironment.id).where(
+            BTPEnvironment.btp_account_id == row.btp_account_id,
+            BTPEnvironment.name == data.name,
+            BTPEnvironment.id != environment_id,
+        )
+    )
+    if same_name:
+        raise ConflictError("An environment with this name already exists in the subaccount.", code="btp_environment_exists")
+    if data.external_runtime_id:
+        same_external = await ctx.session.scalar(
+            select(BTPEnvironment.id).where(
+                BTPEnvironment.runtime_type == data.runtime_type,
+                BTPEnvironment.external_runtime_id == data.external_runtime_id,
+                BTPEnvironment.id != environment_id,
+            )
+        )
+        if same_external:
+            raise ConflictError("An environment with this runtime id already exists.", code="btp_environment_exists")
+    row.name = data.name
+    row.runtime_type = data.runtime_type
+    row.external_runtime_id = data.external_runtime_id or None
+    audit_service.record(
+        ctx.session,
+        AuditEventType.BTP_MAPPING_CHANGED,
+        Outcome.SUCCESS,
+        actor_user_id=ctx.actor_id,
+        btp_account_id=row.btp_account_id,
+        btp_environment_id=row.id,
+        details={"via": "admin_api", "action": "environment_updated"},
+    )
+    await ctx.session.commit()
+    return row
 
 
 @dataclass
